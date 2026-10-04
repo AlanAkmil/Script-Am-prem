@@ -1,0 +1,3649 @@
+/**
+ * =======================================================
+ *  Project   : Alight Motion (Alight Creative) Suite
+ *  Category  : Scrapers / Motion Graphics & Presets
+ *  Desc      : 100% Native Authentication, Dual-Mode Pro Generator (Direct Replay & Master Pool),
+ *              Auto-Renew Session Manager & XML/Audio Preset Downloader
+ *  Channel   : https://whatsapp.com/channel/0029Vb7olzNAO7R9awDbj40d
+ *  Base URL  : https://identitytoolkit.googleapis.com / https://us-central1-alight-creative.cloudfunctions.net
+ *  Author    : OmnifyLabs
+ * =======================================================
+ */
+
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+const axios = require("axios");
+const cheerio = require("cheerio");
+const readline = require("readline");
+const { createSecureHttpsAgent } = require("../../core/http/doh-resolver");
+const { TempMailClient } = require("./tempmail");
+
+const OMNIFY_CREDITS = Object.freeze({
+  brand: "OmnifyLabs",
+  developer: "OmnifyLabs",
+  author: "OmnifyLabs",
+  channel: "https://whatsapp.com/channel/0029Vb7olzNAO7R9awDbj40d",
+  signature: "OmnifyLabs-v2.0",
+  buildHash:
+    "omnify_" +
+    crypto
+      .createHash("sha256")
+      .update("OmnifyLabs-AlightMotion-Pro-2026")
+      .digest("hex")
+      .slice(0, 16),
+  verifiedBy: "OmnifyLabs",
+});
+
+const FIREBASE_WEB_API_KEY =
+  process.env.ALIGHT_API_KEY || "AIzaSyDrZ9jr_Y16ltSBqsQR5IH6I04FRga6Ki0";
+const FIREBASE_AUTH_BASE = "https://identitytoolkit.googleapis.com/v1/accounts";
+const SECURE_TOKEN_BASE = "https://securetoken.googleapis.com/v1/token";
+const CLOUD_FUNCTIONS_BASE =
+  "https://us-central1-alight-creative.cloudfunctions.net";
+const ALIGHT_CONTINUE_URL = "https://alightcreative.com/am/auth/finish";
+
+const PROJECT_ROOT = path.resolve(__dirname, "../../../");
+const SESSION_DIR = fs.existsSync(path.join(process.cwd(), "package.json"))
+  ? path.join(process.cwd(), "storage", "alightmotion")
+  : path.join(PROJECT_ROOT, "storage", "alightmotion");
+const MASTER_SESSION_FILE = path.join(SESSION_DIR, "master-session.json");
+const PRO_ACCOUNTS_FILE = path.join(SESSION_DIR, "pro-accounts.json");
+const GENERATED_ACCOUNTS_FILE = path.join(
+  SESSION_DIR,
+  "generated-accounts.json",
+);
+
+const NATIVE_HEADERS = {
+  "Content-Type": "application/json",
+  Origin: "https://alight-creative.firebaseapp.com",
+  Referer: "https://alight-creative.firebaseapp.com/",
+  "User-Agent":
+    "Mozilla/5.0 (Linux; Android 13; Redmi Note 7 Build/TQ3A.230901.001.B1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Mobile Safari/537.36",
+};
+
+/**
+ * Tampilkan Banner Resmi OmnifyLabs
+ */
+function printOmnifyBanner() {
+  console.log(`\x1b[36m
+   ___                 _  __       __          __       
+  / _ \\ _ __  _ __  (_)/ _|_   _/ /   __ _  / /_  ___ 
+ / // /| '  \\| '  \\| |  _| || |/ /__ / _\` || '_ \\(_-< 
+ \\___/ |_|_|_|_|_|_|_|_|  \\_, /|____/ \\__,_||_.__//__/ 
+                          |__/                         
+ \x1b[1m\x1b[35m[ Alight Motion Suite v2.0 ]\x1b[0m
+ \x1b[90mOfficial Channel: ${OMNIFY_CREDITS.channel}\x1b[0m
+\x1b[0m`);
+}
+
+/**
+ * Render Kartu Informasi Akun Bersih & Terstandarisasi (DRY Component)
+ * @param {Object} data - Objek info akun
+ * @param {Object} [options] - Opsi judul & konteks
+ */
+function printAccountCard(data, options = {}) {
+  const isPro = Boolean(
+    data.isPro ?? data.license?.isPro ?? data.master?.isPro,
+  );
+  const defaultTitle = isPro
+    ? "AKUN BERHASIL AKTIF PRO!"
+    : "STATUS AKUN ALIGHT MOTION";
+  const title = options.title || defaultTitle;
+  const isError = options.isError || options.type === "error" || !isPro;
+
+  console.log(
+    `\n\x1b[1m${isError ? "\x1b[31m=== [✕] " : "\x1b[32m=== [✓] "}${title} ===\x1b[0m`,
+  );
+
+  const email = data.email || data.user?.email || data.master?.email;
+  if (email) {
+    const label = options.emailLabel || "Email Akun   ";
+    console.log(`  ${label.padEnd(14)}: \x1b[1m\x1b[33m${email}\x1b[0m`);
+  }
+
+  const uid = data.localId || data.user?.localId || data.master?.localId;
+  if (uid) {
+    console.log(`  UID Firebase  : \x1b[36m${uid}\x1b[0m`);
+  }
+
+  console.log(
+    `  Status Pro    : ${isPro ? "\x1b[32m[PRO AKTIF ⭐]\x1b[0m" : "\x1b[31m[TIDAK AKTIF / FREE]\x1b[0m"}`,
+  );
+
+  const expiresAt =
+    data.licenseExpires ||
+    data.expiresAt ||
+    data.license?.expiresAt ||
+    data.master?.licenseExpires;
+  if (expiresAt) {
+    console.log(`  Masa Berlaku  : \x1b[33m${expiresAt}\x1b[0m`);
+  } else if (!isPro) {
+    console.log(`  Masa Berlaku  : \x1b[90mN/A (Tidak Berlangganan)\x1b[0m`);
+  }
+
+  const orderId = data.orderId || options.orderId;
+  if (orderId) {
+    console.log(`  Order ID      : \x1b[36m${orderId}\x1b[0m`);
+  }
+
+  const rawBenefits =
+    data.benefits || data.license?.benefits || data.master?.benefits;
+  if (isPro && Array.isArray(rawBenefits) && rawBenefits.length > 0) {
+    console.log(`  Benefits      : \x1b[35m${rawBenefits.join(", ")}\x1b[0m`);
+  } else {
+    console.log(
+      `  Benefits      : \x1b[90m(Tidak ada benefit Pro / Akun Free)\x1b[0m`,
+    );
+  }
+
+  const mode = data.mode || options.mode;
+  if (mode) {
+    console.log(`  Mode Server   : \x1b[33m${mode.toUpperCase()}\x1b[0m`);
+  }
+
+  if (options.note) {
+    console.log(`  Keterangan    : \x1b[33m${options.note}\x1b[0m`);
+  }
+
+  if (options.fileNote) {
+    console.log(`  Sesi File     : \x1b[90m${options.fileNote}\x1b[0m`);
+  }
+}
+
+/**
+ * 0. Smart JWT Expiry Cache Helper
+ * Memeriksa apakah token Firebase JWT sudah kedaluwarsa secara offline
+ * @param {string} idToken
+ * @param {number} [bufferSeconds=60]
+ * @returns {boolean}
+ */
+function isTokenExpired(idToken, bufferSeconds = 60) {
+  if (!idToken || typeof idToken !== "string") return true;
+  try {
+    const parts = idToken.split(".");
+    if (parts.length < 2) return true;
+    const payload = JSON.parse(
+      Buffer.from(parts[1], "base64").toString("utf8"),
+    );
+    if (!payload.exp) return true;
+    return Date.now() + bufferSeconds * 1000 >= payload.exp * 1000;
+  } catch (_) {
+    return true;
+  }
+}
+
+/**
+ * 0b. Auto-Refresh Token Middleware
+ * Pastikan ID Token yang dipakai selalu valid. Jika kedaluwarsa, otomatis refresh via refreshToken.
+ * Juga update token tersimpan di storage (generated-accounts / pro-accounts) agar sinkron.
+ * @param {string} idToken
+ * @param {string} refreshToken
+ * @param {string} [email] - Jika diisi, token baru otomatis di-update ke storage
+ * @returns {Promise<{ idToken: string, refreshToken: string, wasRefreshed: boolean }>}
+ */
+async function ensureFreshToken(idToken, refreshToken, email = null) {
+  if (!isTokenExpired(idToken)) {
+    return { idToken, refreshToken, wasRefreshed: false };
+  }
+
+  if (!refreshToken) {
+    throw new Error(
+      "ID Token kedaluwarsa dan tidak ada Refresh Token untuk memperbaruinya.",
+    );
+  }
+
+  const refreshed = await refreshUserToken(refreshToken);
+
+  // Auto-update storage jika email diketahui (sinkron antar sesi)
+  if (email) {
+    const saved = getSavedAccount(email);
+    if (saved) {
+      const updated = {
+        ...saved,
+        idToken: refreshed.idToken,
+        refreshToken: refreshed.refreshToken,
+        tokenRefreshedAt: new Date().toISOString(),
+      };
+      if (saved._storageType === "pro" || saved.category === "pro") {
+        saveProAccount(email, updated);
+      } else {
+        saveGeneratedAccount(email, updated);
+      }
+    }
+  }
+
+  return {
+    idToken: refreshed.idToken,
+    refreshToken: refreshed.refreshToken,
+    wasRefreshed: true,
+  };
+}
+
+function readJsonSafe(filePath, defaultVal = {}) {
+  try {
+    if (fs.existsSync(filePath)) {
+      return JSON.parse(fs.readFileSync(filePath, "utf8"));
+    }
+  } catch (_) {}
+  return defaultVal;
+}
+
+function writeJsonSafe(filePath, data) {
+  try {
+    const targetDir = path.dirname(filePath);
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
+    }
+    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * 1. Simpan Sesi Akun Master ke Penyimpanan Lokal
+ * @param {Object} sessionData
+ */
+function saveMasterSession(sessionData) {
+  try {
+    const payload = {
+      ...sessionData,
+      _engine: OMNIFY_CREDITS,
+    };
+    writeJsonSafe(MASTER_SESSION_FILE, payload);
+    // Simpan juga ke pro-accounts.json agar sinkron
+    saveProAccount(sessionData.email, sessionData);
+  } catch (_) {}
+}
+
+/**
+ * Dynamic Hardware Identity & Client Profile Generator
+ * Menghasilkan identitas perangkat Android acak per request:
+ * - X-Android-Cert (variasi format huruf besar, huruf kecil, dan separator titik dua resmi APK SHA-1)
+ * - Dynamic pseudo FCM token (format resmi Google Firebase Cloud Messaging token)
+ * - Android Hardware ID (16-char random hex string unik per perangkat)
+ *
+ * @param {Object} [overrides]
+ * @returns {{ cert: string, androidId: string, fcmToken: string, headers: Object }}
+ */
+function generateDeviceProfile(overrides = {}) {
+  const certVariants = [
+    "ECA6BF91B8715A6F810ED0BBFC65B6CD578F52A8",
+    "eca6bf91b8715a6f810ed0bbfc65b6cd578f52a8",
+    "EC:A6:BF:91:B8:71:5A:6F:81:0E:D0:BB:FC:65:B6:CD:57:8F:52:A8",
+    "ec:a6:bf:91:b8:71:5a:6f:81:0e:d0:bb:fc:65:b6:cd:57:8f:52:a8",
+  ];
+  const cert =
+    overrides.cert ||
+    certVariants[Math.floor(Math.random() * certVariants.length)];
+
+  // Android ID: 64-bit integer sebagai 16 karakter hex (Settings.Secure.ANDROID_ID)
+  const androidId =
+    overrides.androidId ||
+    process.env.ALIGHT_ANDROID_ID ||
+    crypto.randomBytes(8).toString("hex").toLowerCase();
+
+  // Pseudo FCM Token: format Firebase Cloud Messaging untuk Android Client
+  const fcmPart1 = crypto.randomBytes(11).toString("base64url");
+  const fcmPart2 = crypto.randomBytes(90).toString("base64url").slice(0, 134);
+  const pseudoFcm = `cSDnCyp3T-${fcmPart1}:APA91b${fcmPart2}`;
+  const fcmToken =
+    overrides.instanceIdToken ||
+    overrides.fcmToken ||
+    process.env.ALIGHT_FCM_TOKEN ||
+    pseudoFcm;
+
+  return {
+    cert,
+    androidId,
+    fcmToken,
+    headers: {
+      "X-Android-Package": "com.alightcreative.motion",
+      "X-Android-Cert": cert,
+      "X-Android-Device-Id": androidId,
+      "X-Android-Id": androidId,
+      "firebase-instance-id-token": fcmToken,
+    },
+  };
+}
+
+/**
+ * 2. Muat Sesi Akun Master
+ * @returns {Object|null}
+ */
+function loadMasterSession() {
+  try {
+    if (fs.existsSync(MASTER_SESSION_FILE)) {
+      const raw = fs.readFileSync(MASTER_SESSION_FILE, "utf8");
+      return JSON.parse(raw);
+    }
+  } catch (_) {}
+
+  // Fallback ke .env jika dikonfigurasi
+  if (
+    process.env.ALIGHT_MASTER_REFRESH_TOKEN ||
+    process.env.ALIGHT_MASTER_TOKEN
+  ) {
+    return {
+      email: process.env.ALIGHT_MASTER_EMAIL || "master@alight.local",
+      idToken: process.env.ALIGHT_MASTER_TOKEN || "",
+      refreshToken: process.env.ALIGHT_MASTER_REFRESH_TOKEN || "",
+      localId: process.env.ALIGHT_MASTER_UID || "",
+      updatedAt: new Date().toISOString(),
+      _engine: OMNIFY_CREDITS,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Dapatkan purchaseToken akun master yang valid dari session tersimpan atau options/env
+ * @param {Object} [options]
+ * @returns {string|null}
+ */
+function getMasterPurchaseToken(options = {}) {
+  const master = loadMasterSession();
+  const token =
+    options.purchaseToken ||
+    options.token ||
+    master?.purchaseToken ||
+    process.env.ALIGHT_PURCHASE_TOKEN;
+  if (token && typeof token === "string" && token.trim()) {
+    return token.trim();
+  }
+
+  // Gunakan token autentikasi sesi Akun Master yang terdaftar secara dinamis
+  return master?.idToken || null;
+}
+
+/**
+ * Periksa status Akun Master Pro secara komprehensif
+ * Memastikan akun master ada di storage dan status lisensinya Pro aktif.
+ * @param {Object} [options]
+ * @returns {{ ready: boolean, master: Object|null, token: string|null, reason: string }}
+ */
+function getMasterAccountStatus(options = {}) {
+  const master = loadMasterSession();
+  const token = getMasterPurchaseToken(options);
+  const proAccounts = loadProAccounts();
+  const count = Math.max(Object.keys(proAccounts).length, master ? 1 : 0);
+
+  if (!master) {
+    return {
+      ready: false,
+      master: null,
+      token: null,
+      count,
+      reason: "Belum ada Akun Master yang didaftarkan di storage.",
+    };
+  }
+
+  if (master.isPro === false) {
+    return {
+      ready: false,
+      master,
+      token,
+      count,
+      reason: "Akun Master berstatus Free / Lisensi Tidak Aktif.",
+    };
+  }
+
+  return {
+    ready: true,
+    master,
+    token,
+    count,
+    reason: `Akun Master Pro (${count} Akun Terdaftar) aktif & siap digunakan.`,
+  };
+}
+
+/**
+ * Validasi apakah Akun Master Pro sudah terdaftar dan siap digunakan.
+ * Menolak keras eksekusi fitur Pro jika akun master belum didaftarkan atau belum Pro.
+ * @param {Object} [options]
+ * @returns {{ master: Object, token: string }}
+ */
+function ensureMasterAccountReady(options = {}) {
+  const status = getMasterAccountStatus(options);
+  if (!status.ready) {
+    throw new Error(
+      `[!] ${status.reason}\n` +
+        `    Untuk membuat atau mengaktifkan akun Pro, Anda WAJIB mendaftarkan Akun Master Pro terlebih dahulu.\n` +
+        `    Silakan daftarkan Akun Master Anda melalui Menu [3] (Daftarkan Akun Master Pro).`,
+    );
+  }
+  return { master: status.master, token: status.token };
+}
+
+/**
+ * 3. Kelola Database Sesi Akun Terpisah (Pro Accounts vs Generated Accounts)
+ */
+function loadProAccounts() {
+  return readJsonSafe(PRO_ACCOUNTS_FILE, {});
+}
+
+function saveProAccount(email, data) {
+  const accs = loadProAccounts();
+  accs[email.toLowerCase().trim()] = {
+    ...data,
+    category: "pro",
+    updatedAt: new Date().toISOString(),
+  };
+  writeJsonSafe(PRO_ACCOUNTS_FILE, accs);
+}
+
+function loadGeneratedAccounts() {
+  return readJsonSafe(GENERATED_ACCOUNTS_FILE, {});
+}
+
+function saveGeneratedAccount(email, data) {
+  const accs = loadGeneratedAccounts();
+  accs[email.toLowerCase().trim()] = {
+    ...data,
+    category: "generated",
+    updatedAt: new Date().toISOString(),
+  };
+  writeJsonSafe(GENERATED_ACCOUNTS_FILE, accs);
+}
+
+function loadAccounts(type = "all") {
+  const pro = loadProAccounts();
+  const gen = loadGeneratedAccounts();
+  if (type === "pro") return pro;
+  if (type === "generated") return gen;
+  return { ...pro, ...gen };
+}
+
+function saveAccount(email, data, type = "generated") {
+  if (type === "pro") {
+    saveProAccount(email, data);
+  } else {
+    saveGeneratedAccount(email, data);
+  }
+}
+
+function getSavedAccount(email) {
+  const key = email.toLowerCase().trim();
+  const gen = loadGeneratedAccounts();
+  if (gen[key]) return { ...gen[key], _storageType: "generated" };
+  const pro = loadProAccounts();
+  if (pro[key]) return { ...pro[key], _storageType: "pro" };
+  return null;
+}
+
+function deleteSavedAccount(email) {
+  const key = email.toLowerCase().trim();
+  let deleted = false;
+  const gen = loadGeneratedAccounts();
+  if (gen[key]) {
+    delete gen[key];
+    writeJsonSafe(GENERATED_ACCOUNTS_FILE, gen);
+    deleted = true;
+  }
+  const pro = loadProAccounts();
+  if (pro[key]) {
+    delete pro[key];
+    writeJsonSafe(PRO_ACCOUNTS_FILE, pro);
+    deleted = true;
+  }
+  return deleted;
+}
+
+/**
+ * 4. Refresh Token Firebase Akun Apa Saja (Mendapatkan ID Token Baru dari Google)
+ * @param {string} refreshToken
+ * @returns {Promise<{ idToken: string, refreshToken: string, userId: string, expiresIn: string }>}
+ */
+async function refreshUserToken(refreshToken) {
+  if (!refreshToken) throw new Error("Refresh token wajib disertakan.");
+
+  const res = await axios.post(
+    `${SECURE_TOKEN_BASE}?key=${FIREBASE_WEB_API_KEY}`,
+    `grant_type=refresh_token&refresh_token=${refreshToken.trim()}`,
+    {
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Origin: "https://alight-creative.firebaseapp.com",
+        Referer: "https://alight-creative.firebaseapp.com/",
+      },
+      httpsAgent: createSecureHttpsAgent(),
+      timeout: 15000,
+    },
+  );
+
+  return {
+    idToken: res.data?.id_token,
+    refreshToken: res.data?.refresh_token || refreshToken,
+    userId: res.data?.user_id,
+    expiresIn: res.data?.expires_in,
+  };
+}
+
+/**
+ * 5. Refresh Sesi Akun Master (Dengan Smart JWT Expiry Cache)
+ * Jika token masih berlaku > 2 menit dan tidak dipaksa (force=false), gunakan token aktif tanpa round-trip HTTP.
+ * @param {string} [refreshToken]
+ * @param {boolean} [force=false]
+ * @returns {Promise<Object>}
+ */
+async function refreshMasterSession(refreshToken, force = false) {
+  const current = loadMasterSession();
+
+  // Smart Cache: jika token aktif masih fresh, gunakan langsung!
+  if (
+    !force &&
+    !refreshToken &&
+    current?.idToken &&
+    !isTokenExpired(current.idToken, 120)
+  ) {
+    return current;
+  }
+
+  const tokenToUse =
+    refreshToken ||
+    current?.refreshToken ||
+    process.env.ALIGHT_MASTER_REFRESH_TOKEN;
+
+  if (!tokenToUse) {
+    throw new Error("Belum ada Akun Master Pro yang terdaftar.");
+  }
+
+  const refreshed = await refreshUserToken(tokenToUse);
+
+  // Ambil lisensi real-time dari server jika belum ada di sesi master
+  let isPro = current?.isPro ?? true;
+  let licenseExpires = current?.licenseExpires || current?.expiresAt || null;
+  let benefits = current?.benefits || null;
+
+  if (!licenseExpires || !benefits || !benefits.length) {
+    try {
+      const liveLic = await getLicenseStatus(refreshed.idToken);
+      if (liveLic) {
+        isPro = liveLic.isPro;
+        licenseExpires = liveLic.expiresAt || null;
+        benefits = liveLic.benefits || [];
+      }
+    } catch (_) {}
+  }
+
+  const updatedSession = {
+    ...current,
+    email: current?.email || "master@alight.local",
+    localId: refreshed.userId || current?.localId,
+    idToken: refreshed.idToken,
+    refreshToken: refreshed.refreshToken,
+    expiresIn: refreshed.expiresIn,
+    isPro: isPro,
+    licenseExpires: licenseExpires,
+    benefits: benefits || [],
+    updatedAt: new Date().toISOString(),
+    _engine: OMNIFY_CREDITS,
+  };
+
+  saveMasterSession(updatedSession);
+  if (updatedSession.email) {
+    saveProAccount(updatedSession.email, updatedSession);
+  }
+  return updatedSession;
+}
+
+/**
+ * 5b. Auto-Heartbeat & Background Refresh Akun Master Pro
+ * Memeriksa kesehatan & kesegaran sesi Akun Master Pro secara berkala.
+ * Jika ID Token mendekati masa kedaluwarsa (< 5 menit) atau sudah kedaluwarsa,
+ * otomatis melakukan silent refresh menggunakan Refresh Token agar sesi master
+ * selalu hangat (warm) & siap pakai kapan saja tanpa interupsi.
+ *
+ * @param {Object} [options]
+ * @param {boolean} [options.silent=true] - Tidak mencetak log ke console (berguna untuk background daemon)
+ * @param {boolean} [options.force=false] - Paksa refresh meskipun token masih fresh
+ * @returns {Promise<{ active: boolean, refreshed: boolean, reason?: string, master?: Object, error?: string }>}
+ */
+async function heartbeatMasterSession(options = {}) {
+  const silent = options.silent !== false;
+  const master = loadMasterSession();
+
+  if (!master) {
+    return {
+      active: false,
+      refreshed: false,
+      reason: "Belum ada Akun Master terdaftar.",
+    };
+  }
+
+  if (!master.refreshToken) {
+    return {
+      active: false,
+      refreshed: false,
+      reason: "Akun Master tidak memiliki refreshToken.",
+    };
+  }
+
+  // Cek apakah ID Token sudah expired atau akan kedaluwarsa dalam buffer 300 detik (5 menit)
+  const isExpiringSoon = isTokenExpired(master.idToken, 300);
+
+  if (!isExpiringSoon && !options.force) {
+    return { active: true, refreshed: false, master };
+  }
+
+  try {
+    const updated = await refreshMasterSession(master.refreshToken, true);
+    if (!silent) {
+      console.log(
+        `\x1b[90m[⚡ Auto-Heartbeat] Sesi Akun Master (${updated.email}) berhasil diperbarui otomatis.\x1b[0m`,
+      );
+    }
+    return { active: true, refreshed: true, master: updated };
+  } catch (err) {
+    if (!silent) {
+      console.log(
+        `\x1b[33m[!] Heartbeat gagal memperbarui sesi master: ${err.message}\x1b[0m`,
+      );
+    }
+    return { active: false, refreshed: false, error: err.message };
+  }
+}
+
+/**
+ * 6. Kirim Email Magic-Link Login Alight Motion (100% Native)
+ * @param {string} email - Alamat email target (cth: "user@gmail.com")
+ * @returns {Promise<Object>}
+ */
+async function sendMagicLink(email) {
+  if (!email || !email.includes("@")) {
+    throw new Error("Alamat email valid wajib disertakan.");
+  }
+
+  const payload = {
+    requestType: "EMAIL_SIGNIN",
+    email: email.trim(),
+    continueUrl: ALIGHT_CONTINUE_URL,
+    canHandleCodeInApp: true,
+  };
+
+  const res = await axios.post(
+    `${FIREBASE_AUTH_BASE}:sendOobCode?key=${FIREBASE_WEB_API_KEY}`,
+    payload,
+    {
+      headers: NATIVE_HEADERS,
+      httpsAgent: createSecureHttpsAgent(),
+      timeout: 15000,
+    },
+  );
+
+  return {
+    status: "success",
+    email: res.data?.email || email,
+    message:
+      "Magic Link login resmi Alight Motion berhasil dikirim ke inbox email user.",
+    kind: res.data?.kind,
+    developer: OMNIFY_CREDITS.developer,
+    channel: OMNIFY_CREDITS.channel,
+  };
+}
+
+/**
+ * 7. Ekstrak oobCode dari Magic Link URL
+ * @param {string} magicLink - URL lengkap dari tombol email login
+ * @returns {string}
+ */
+function extractOobCode(magicLink) {
+  if (!magicLink) return "";
+  if (!magicLink.includes("http") && !magicLink.includes("=")) {
+    return magicLink.trim();
+  }
+
+  const directMatch = magicLink.match(/oobCode=([a-zA-Z0-9_\-]+)/);
+  if (directMatch && directMatch[1]) {
+    return directMatch[1];
+  }
+
+  let decoded = decodeURIComponent(magicLink);
+  let match = decoded.match(/oobCode=([a-zA-Z0-9_\-]+)/);
+  if (match && match[1]) {
+    return match[1];
+  }
+
+  try {
+    const urlObj = new URL(magicLink);
+    let code = urlObj.searchParams.get("oobCode");
+    if (code) return code;
+
+    let nestedLink =
+      urlObj.searchParams.get("link") ||
+      urlObj.searchParams.get("url") ||
+      urlObj.searchParams.get("q");
+    if (nestedLink) {
+      const nestedObj = new URL(nestedLink);
+      code = nestedObj.searchParams.get("oobCode");
+      if (code) return code;
+    }
+  } catch (_) {}
+
+  return magicLink.trim();
+}
+
+/**
+ * 8. Verifikasi & Login Native Magic-Link (Mendapatkan idToken & User Profile)
+ * @param {string} email - Email akun
+ * @param {string} magicLinkOrOobCode - URL Magic Link atau kode oobCode dari email
+ * @returns {Promise<Object>}
+ */
+async function verifyMagicLink(email, magicLinkOrOobCode) {
+  if (!email || !email.includes("@")) {
+    throw new Error(
+      "Alamat email wajib disertakan untuk verifikasi magic link.",
+    );
+  }
+  if (!magicLinkOrOobCode) {
+    throw new Error("Magic Link URL atau oobCode wajib disertakan.");
+  }
+
+  const oobCode = extractOobCode(magicLinkOrOobCode);
+
+  const payload = {
+    email: email.trim(),
+    oobCode: oobCode,
+  };
+
+  const res = await axios.post(
+    `${FIREBASE_AUTH_BASE}:signInWithEmailLink?key=${FIREBASE_WEB_API_KEY}`,
+    payload,
+    {
+      headers: NATIVE_HEADERS,
+      httpsAgent: createSecureHttpsAgent(),
+      timeout: 15000,
+    },
+  );
+
+  return {
+    status: "success",
+    email: res.data?.email || email,
+    localId: res.data?.localId,
+    idToken: res.data?.idToken,
+    refreshToken: res.data?.refreshToken,
+    expiresIn: res.data?.expiresIn,
+    isNewUser: Boolean(res.data?.isNewUser),
+    developer: OMNIFY_CREDITS.developer,
+    channel: OMNIFY_CREDITS.channel,
+  };
+}
+
+/**
+ * 9. Ambil Info Akun User Alight Motion (Mode Auth Token)
+ * @param {string} idToken - Firebase ID Token
+ * @returns {Promise<Object>}
+ */
+async function getAccountInfo(idToken) {
+  if (!idToken)
+    throw new Error("ID Token wajib disertakan untuk lookup info akun.");
+
+  const res = await axios.post(
+    `${FIREBASE_AUTH_BASE}:lookup?key=${FIREBASE_WEB_API_KEY}`,
+    {
+      idToken: idToken.trim(),
+    },
+    {
+      headers: NATIVE_HEADERS,
+      httpsAgent: createSecureHttpsAgent(),
+      timeout: 15000,
+    },
+  );
+
+  const user = res.data?.users?.[0];
+  if (!user) throw new Error("Data profil akun tidak ditemukan.");
+
+  return {
+    localId: user.localId,
+    email: user.email,
+    displayName: user.displayName || "N/A",
+    photoUrl: user.photoUrl || null,
+    emailVerified: user.emailVerified,
+    createdAt: user.createdAt
+      ? new Date(Number(user.createdAt)).toISOString()
+      : null,
+    lastLoginAt: user.lastLoginAt
+      ? new Date(Number(user.lastLoginAt)).toISOString()
+      : null,
+    providerUserInfo: user.providerUserInfo || [],
+    developer: OMNIFY_CREDITS.developer,
+    channel: OMNIFY_CREDITS.channel,
+  };
+}
+
+/**
+ * 10. Cek Status Lisensi & Membership Pro Alight Motion (100% Native Cloud Function)
+ * @param {string} idToken - Firebase ID Token akun
+ * @param {Object} [options]
+ * @returns {Promise<Object>}
+ */
+async function getLicenseStatus(idToken, options = {}) {
+  // Randomisasi identitas hardware per request (X-Android-Cert, FCM Token, Android Hardware ID)
+  const device = generateDeviceProfile(options);
+
+  const headers = {
+    "content-type": "application/json; charset=utf-8",
+    "accept-encoding": "gzip",
+    "user-agent": "okhttp/3.12.1",
+    ...device.headers,
+    ...(options.headers || {}),
+  };
+
+  if (idToken) {
+    headers["authorization"] = `Bearer ${idToken.trim()}`;
+  }
+
+  const res = await axios.post(
+    `${CLOUD_FUNCTIONS_BASE}/getAccountStatus`,
+    {
+      data: {
+        package: "com.alightcreative.motion",
+        version: options.appVersion || "5.0.279",
+      },
+    },
+    {
+      headers,
+      httpsAgent: createSecureHttpsAgent(),
+      timeout: 15000,
+    },
+  );
+
+  const result = res.data?.result || {};
+  return {
+    status: "success",
+    isPro: Boolean(result.licenseValid),
+    expiresAt: result.licenseExpires
+      ? new Date(Number(result.licenseExpires)).toISOString()
+      : null,
+    benefits: result.licenseBenefits || [],
+    label: result.licenseLabel || {},
+    details: result.licenseDetails || {},
+    serverTime: result.msTime
+      ? new Date(Number(result.msTime)).toISOString()
+      : null,
+    developer: OMNIFY_CREDITS.developer,
+    channel: OMNIFY_CREDITS.channel,
+  };
+}
+
+/**
+ * 11. Daftarkan / Hubungkan Akun Master Pro
+ * @param {string} masterEmail - Email akun master yang sudah berlangganan Pro
+ * @param {string} magicLink - Link login yang diterima email master
+ * @param {Object} [options]
+ * @param {string} [options.purchaseToken] - Play Store purchase token akun master (opsional)
+ * @returns {Promise<Object>}
+ */
+async function setMasterAccount(masterEmail, magicLink, options = {}) {
+  const auth = await verifyMagicLink(masterEmail, magicLink);
+  let license = { isPro: false, expiresAt: null, benefits: [] };
+  try {
+    license = await getLicenseStatus(auth.idToken);
+  } catch (_) {}
+
+  // Validasi ketat: Akun WAJIB memiliki status Pro aktif untuk dijadikan Akun Master!
+  if (!license.isPro) {
+    return {
+      status: "error",
+      success: false,
+      message:
+        "Akun ini bukan akun Pro (Free / Lisensi Tidak Aktif). Pendaftaran Akun Master ditolak dan tidak disimpan.",
+      master: {
+        email: auth.email,
+        localId: auth.localId,
+        idToken: auth.idToken,
+        refreshToken: auth.refreshToken,
+        isPro: false,
+        licenseExpires: license.expiresAt || null,
+        benefits: [],
+        registeredAt: null,
+      },
+      developer: OMNIFY_CREDITS.developer,
+      channel: OMNIFY_CREDITS.channel,
+    };
+  }
+
+  // Ambil token dari detail lisensi akun master yang terverifikasi Pro, opsi, atau env
+  const purchaseToken =
+    license.details?.token ||
+    license.details?.purchaseToken ||
+    license.details?.receipt ||
+    options.purchaseToken ||
+    process.env.ALIGHT_PURCHASE_TOKEN ||
+    null;
+
+  const masterData = {
+    email: auth.email,
+    localId: auth.localId,
+    idToken: auth.idToken,
+    refreshToken: auth.refreshToken,
+    isPro: true,
+    licenseExpires:
+      license.expiresAt || new Date(Date.now() + 365 * 86400000).toISOString(),
+    benefits: license.benefits?.length ? license.benefits : [],
+    purchaseToken, // ← disimpan di master session
+    registeredAt: new Date().toISOString(),
+    developer: OMNIFY_CREDITS.developer,
+    channel: OMNIFY_CREDITS.channel,
+  };
+
+  saveMasterSession(masterData);
+
+  return {
+    status: "success",
+    success: true,
+    message: "Akun Master Pro berhasil didaftarkan dan disimpan ke sesi aktif.",
+    master: masterData,
+    developer: OMNIFY_CREDITS.developer,
+    channel: OMNIFY_CREDITS.channel,
+  };
+}
+
+/**
+ * 12. Tembak Langsung verifyPurchase ke Cloud Functions Alight Creative (Native Exploit Engine)
+ * @param {string} idToken - Firebase ID Token akun target
+ * @param {Object} [options] - { productId, token, skuType, orderId, instanceIdToken }
+ * @returns {Promise<Object>}
+ */
+async function applyPremium(idToken, options = {}) {
+  // Order ID OmnifyLabs Engine:
+  // Format default: omnifylabs-<random_hex> (cth: omnifylabs-9e2a4b8c1d3f)
+  const prefix =
+    options.orderPrefix || process.env.ALIGHT_ORDER_PREFIX || "omnifylabs-";
+  const calculatedOrderId = `${prefix}${crypto.randomBytes(6).toString("hex")}`;
+  const orderId =
+    options.orderId || process.env.ALIGHT_ORDER_ID || calculatedOrderId;
+
+  const productId =
+    options.productId ||
+    process.env.ALIGHT_PRODUCT_ID ||
+    "am.full.sub.annual.19q4";
+
+  // Ambil purchaseToken dari master session atau env — WAJIB ada, tidak ada fallback hardcoded
+  const { token: purchaseToken } = ensureMasterAccountReady(options);
+
+  const skuType = options.skuType || "subs";
+
+  // Randomisasi identitas hardware per request (X-Android-Cert, FCM Token, Android Hardware ID)
+  const device = generateDeviceProfile(options);
+
+  const headers = {
+    authorization: "Bearer " + idToken.trim(),
+    "content-type": "application/json; charset=utf-8",
+    "accept-encoding": "gzip",
+    "user-agent": "okhttp/3.12.1",
+    ...device.headers,
+    ...(options.headers || {}),
+  };
+
+  const res = await axios.post(
+    `${CLOUD_FUNCTIONS_BASE}/verifyPurchase`,
+    {
+      data: {
+        productId: productId,
+        token: purchaseToken,
+        skuType: skuType,
+        orderId: orderId,
+      },
+    },
+    {
+      headers,
+      httpsAgent: createSecureHttpsAgent(),
+      timeout: 15000,
+    },
+  );
+
+  return {
+    success: true,
+    data: res.data,
+    orderId,
+    device: {
+      androidId: device.androidId,
+      certVariant: device.cert,
+    },
+    developer: OMNIFY_CREDITS.developer,
+    channel: OMNIFY_CREDITS.channel,
+  };
+}
+
+/**
+ * 13. Generate Akun Pro untuk User (DUAL-MODE: Standalone Direct Replay & Master Pool)
+ * Tidak mewajibkan akun master, bisa jalan mandiri secara direct!
+ *
+ * @param {string} userEmail - Email user yang ingin di-generate jadi Pro
+ * @param {string} [magicLinkOrCode] - Link magic link user (jika sudah ada)
+ * @param {Object} [options]
+ * @returns {Promise<Object>}
+ */
+async function generateProAccount(userEmail, magicLinkOrCode, options = {}) {
+  if (!userEmail || !userEmail.includes("@")) {
+    throw new Error("Alamat email user valid wajib disertakan.");
+  }
+
+  // 1. Cek ketersediaan akun master & purchase token (WAJIB ADA)
+  const { master: masterSession } = ensureMasterAccountReady(options);
+
+  // 2. Jika belum ada link user, kirim email magic link
+  if (!magicLinkOrCode) {
+    const sendResult = await sendMagicLink(userEmail);
+    return {
+      status: "pending_link",
+      email: userEmail,
+      mode: "master-pool",
+      message:
+        "Link OOB verifikasi berhasil dikirim ke user. Salin link dari email user lalu jalankan verifikasi/aktivasi.",
+      masterEmail: masterSession?.email || null,
+      sendResult,
+      developer: OMNIFY_CREDITS.developer,
+      channel: OMNIFY_CREDITS.channel,
+    };
+  }
+
+  // 3. Verifikasi akun user secara native
+  const userAuth = await verifyMagicLink(userEmail, magicLinkOrCode);
+
+  // 4. Tembak langsung verifyPurchase Cloud Function (wajib berhasil)
+  const applyRes = await applyPremium(userAuth.idToken, options);
+
+  // 5. Cek status lisensi real-time langsung dari server Alight!
+  let realLicense = null;
+  try {
+    realLicense = await getLicenseStatus(userAuth.idToken);
+  } catch (_) {}
+
+  const isProActive = realLicense
+    ? Boolean(realLicense.isPro)
+    : Boolean(applyRes?.success);
+
+  if (!isProActive) {
+    throw new Error(
+      `[!] Verifikasi lisensi Pro gagal untuk "${userEmail}". Akun Alight Motion tidak berhasil diaktifkan menjadi Pro.`,
+    );
+  }
+
+  const expiryDate =
+    realLicense?.expiresAt ||
+    masterSession?.licenseExpires ||
+    new Date(Date.now() + 365 * 86400000).toISOString();
+  const benefits = realLicense?.benefits?.length ? realLicense.benefits : [];
+
+  // 6. Simpan akun user ke generated-accounts.json HANYA JIKA PRO AKTIF
+  const accountRecord = {
+    email: userAuth.email,
+    localId: userAuth.localId,
+    idToken: userAuth.idToken,
+    refreshToken: userAuth.refreshToken,
+    isPro: true,
+    expiresAt: expiryDate,
+    benefits: benefits,
+    orderId: applyRes?.orderId || null,
+    mode: "master-pool",
+    category: "generated",
+    activatedAt: new Date().toISOString(),
+    // Data akun temp mail (untuk login ulang inbox jika provider mendukung)
+    ...(options._tempMailData ? { tempMail: options._tempMailData } : {}),
+  };
+  saveGeneratedAccount(userAuth.email, accountRecord);
+
+  return {
+    success: true,
+    mode: "master-pool",
+    user: {
+      localId: userAuth.localId,
+      email: userAuth.email,
+      displayName: userAuth.email.split("@")[0],
+      emailVerified: true,
+      createdAt: String(Date.now()),
+    },
+    master: masterSession
+      ? {
+          email: masterSession.email,
+          localId: masterSession.localId,
+        }
+      : null,
+    license: {
+      isPro: true,
+      expiresAt: expiryDate,
+      benefits: benefits,
+      source: realLicense ? "live-alight-server" : "cloud-function",
+    },
+    orderId: applyRes?.orderId || null,
+    applyError: null,
+    savedAccount: true,
+    storageFile: "storage/alightmotion/generated-accounts.json",
+    developer: OMNIFY_CREDITS.developer,
+    channel: OMNIFY_CREDITS.channel,
+    engine: OMNIFY_CREDITS.signature,
+  };
+}
+
+/**
+ * 13b. Auto-Generate Akun Pro Instan 1-Klik (Full Autonomous: TempMail -> Auto Inbox -> Pro Aktif)
+ * Pengguna tidak perlu memasukkan email atau menyalin link secara manual. "Terima Beres"!
+ *
+ * @param {Object} [options]
+ * @param {string} [options.provider='mailtm'] - 'mailtm' (default) | 'generator.email'
+ * @param {string} [options.usernameType='default'] - 'default' | 'custom' | 'random'
+ * @param {string} [options.customUsername=''] - Custom nama jika dipilih (kosong = omnifylabs)
+ * @param {number} [options.timeoutMs=90000] - Batas waktu tunggu inbox (ms)
+ * @param {number} [options.intervalMs=3000] - Interval polling inbox (ms)
+ * @param {string} [options.orderId] - Custom Order ID
+ * @param {string} [options.orderPrefix] - Custom Order Prefix
+ * @param {Function} [options.onProgress] - Callback progress update
+ * @returns {Promise<Object>}
+ */
+async function autoGenerateProAccount(options = {}) {
+  // Validasi akun master dan purchase token SEBELUM membuat email / kirim magic link
+  ensureMasterAccountReady(options);
+
+  const provider = (options.provider || "mailtm").toLowerCase().trim();
+  const usernameType = (options.usernameType || options.type || "default")
+    .toLowerCase()
+    .trim();
+  const customUsername = (
+    options.customUsername ||
+    options.custom ||
+    options.name ||
+    ""
+  ).trim();
+  const timeoutMs = options.timeoutMs || 90000;
+  const intervalMs = options.intervalMs || 3000;
+  const tempClient = new TempMailClient();
+
+  const tempOptions = {
+    type: usernameType,
+    custom: customUsername,
+  };
+
+  const report = (msg, isSuccess = false) => {
+    if (typeof options.onProgress === "function") {
+      options.onProgress(msg, isSuccess);
+    }
+  };
+
+  // 1. Buat Akun Temp Mail
+  const isGen =
+    provider === "generator.email" ||
+    provider === "generator" ||
+    provider === "gen";
+  report(
+    `[1/4] Membuat alamat email sementara (${isGen ? "Generator.email" : "Mail.tm"})...`,
+  );
+  let tempAcc = null;
+  let activeProvider = isGen ? "generator.email" : "mailtm";
+
+  if (isGen) {
+    try {
+      tempAcc = await tempClient.generateGenEmail(tempOptions);
+      activeProvider = "generator.email";
+    } catch (errGen) {
+      report(
+        `[!] Generator.email gagal (${errGen.message}), beralih ke Mail.tm...`,
+      );
+      tempAcc = await tempClient.generateMailTm(tempOptions);
+      activeProvider = "mailtm";
+    }
+  } else {
+    try {
+      tempAcc = await tempClient.generateMailTm(tempOptions);
+      activeProvider = "mailtm";
+    } catch (errMailTm) {
+      report(
+        `[!] Mail.tm gagal (${errMailTm.message}), mencoba fallback ke Generator.email...`,
+      );
+      tempAcc = await tempClient.generateGenEmail(tempOptions);
+      activeProvider = "generator.email";
+    }
+  }
+
+  const tempEmail = tempAcc.email;
+  report(`[✓] Email sementara siap: "${tempEmail}" (${activeProvider})`, true);
+
+  // 2. Kirim Magic Link Login Alight Creative
+  report(
+    `[2/4] Mengirim Magic Link login resmi Alight Motion ke "${tempEmail}"...`,
+  );
+  const sendRes = await sendMagicLink(tempEmail);
+  report(`[✓] ${sendRes.message}`, true);
+
+  // 3. Polling Inbox dengan Exponential Backoff
+  report(
+    `[3/4] Menunggu email masuk dari Alight Creative & mengekstrak link verifikasi otomatis...`,
+  );
+  const startTime = Date.now();
+  let magicLink = null;
+  let messageFound = null;
+  // MP4: Exponential backoff — mulai dari intervalMs, naik x1.4 tiap poll, max 12s
+  let currentInterval = intervalMs;
+  const maxInterval = 12000;
+
+  while (Date.now() - startTime < timeoutMs) {
+    await new Promise((r) => setTimeout(r, currentInterval));
+    currentInterval = Math.min(Math.round(currentInterval * 1.4), maxInterval);
+
+    let messages = [];
+    try {
+      if (activeProvider === "mailtm") {
+        messages = await tempClient.getInboxMailTm(tempAcc.token);
+      } else {
+        messages = await tempClient.inbox(tempEmail);
+      }
+    } catch (_) {}
+
+    if (messages && messages.length > 0) {
+      for (const m of messages) {
+        const fullContent = `${m.subject || ""} ${m.text || ""} ${m.html || ""}`;
+        const match = fullContent.match(
+          /https:\/\/[^\s"'<>]+oobCode=[a-zA-Z0-9_\-]+[^\s"'<>]*/i,
+        );
+        if (match) {
+          magicLink = match[0].replace(/&amp;/g, "&");
+          messageFound = m;
+          break;
+        }
+      }
+      if (magicLink) break;
+    }
+  }
+
+  if (!magicLink) {
+    throw new Error(
+      `Batas waktu tunggu inbox habis (${Math.round(timeoutMs / 1000)}s). Email verifikasi belum masuk ke "${tempEmail}". Silakan coba lagi.`,
+    );
+  }
+
+  report(
+    `[✓] Magic Link login berhasil dideteksi & diekstrak dari inbox!`,
+    true,
+  );
+
+  // 4. Verifikasi dan Eksekusi Replay Engine Native Pro
+  report(`[4/4] Memverifikasi akun & mengaktifkan status Pro Alight Motion...`);
+  const proResult = await generateProAccount(tempEmail, magicLink, {
+    orderId: options.orderId,
+    orderPrefix: options.orderPrefix,
+    // Pass data tempmail agar tersimpan di generated-accounts.json
+    _tempMailData: {
+      email: tempEmail,
+      provider: activeProvider,
+      password: tempAcc.password || null,
+      token: tempAcc.token || null,
+      inboxUrl:
+        activeProvider === "generator.email"
+          ? `https://generator.email/${tempEmail}`
+          : "https://mail.tm",
+    },
+  });
+
+  return {
+    ...proResult,
+    isAuto: true,
+    tempMail: {
+      email: tempEmail,
+      domain:
+        tempAcc.domain ||
+        (tempEmail.includes("@") ? tempEmail.split("@")[1] : ""),
+      user:
+        tempAcc.user ||
+        (tempEmail.includes("@") ? tempEmail.split("@")[0] : ""),
+      provider: activeProvider,
+      password: tempAcc.password || null,
+      token: tempAcc.token || null,
+      inboxUrl:
+        activeProvider === "generator.email"
+          ? `https://generator.email/${tempEmail}`
+          : "https://mail.tm",
+      messageSubject: messageFound?.subject || "Sign in to Alight Creative",
+    },
+  };
+}
+
+/**
+ * 13b. Kirim dan Ambil Magic Link Login Baru untuk Login di Aplikasi HP
+ * @param {string} email - Email akun target
+ * @param {Object} [options]
+ * @returns {Promise<{ success: boolean, email: string, loginUrl?: string, oobCode?: string, message: string }>}
+ */
+async function getMobileLoginLink(email, options = {}) {
+  if (!email || !email.includes("@")) {
+    throw new Error("Alamat email valid wajib disertakan.");
+  }
+
+  // MP6: Load data sesi tempmail tersimpan (cookies generator.email / token mailtm)
+  const { TempMailClient } = require("./tempmail");
+  const onProgress =
+    typeof options.onProgress === "function" ? options.onProgress : () => {};
+
+  onProgress(`Mengirim Magic Link login baru ke "${email}"...`, false);
+  await sendMagicLink(email);
+  onProgress(`Magic Link berhasil dikirim. Memantau inbox email...`, true);
+
+  const tm = new TempMailClient();
+
+  // Resolve provider dan token dari saved account jika tidak di-pass manual
+  const savedAcc = getSavedAccount(email);
+  const resolvedProvider =
+    options.provider ||
+    savedAcc?.tempMail?.provider ||
+    (email.includes("@") ? "generator.email" : "mailtm");
+  const resolvedToken = options.token || savedAcc?.tempMail?.token || null;
+
+  // MP4: Exponential backoff untuk HP login polling
+  const maxAttempts = options.maxAttempts || 8;
+  const baseInterval = options.pollIntervalMs || 2000;
+  let currentInterval = baseInterval;
+  const maxInterval = 10000;
+  let loginUrl = null;
+
+  for (let i = 0; i < maxAttempts; i++) {
+    await new Promise((r) => setTimeout(r, currentInterval));
+    currentInterval = Math.min(Math.round(currentInterval * 1.4), maxInterval);
+    try {
+      const inboxRes = await tm.inbox({
+        email,
+        token: resolvedToken,
+        provider: resolvedProvider,
+      });
+      const msgs = Array.isArray(inboxRes) ? inboxRes : inboxRes.messages || [];
+      if (msgs.length > 0) {
+        for (const m of msgs) {
+          const content = `${m.html || ""} ${m.text || ""}`;
+          const match = content.match(
+            /https:\/\/alightcreative\.com\/auth_action\/[^\s"'<>]+/,
+          );
+          if (match) {
+            loginUrl = match[0].replace(/&amp;/g, "&");
+            break;
+          }
+        }
+        if (loginUrl) break;
+      }
+    } catch (_) {}
+  }
+
+  if (!loginUrl) {
+    return {
+      success: false,
+      email,
+      message: `Tidak dapat mendeteksi email login baru dalam batas waktu. Silakan buka web inbox manual: https://generator.email/${email}`,
+    };
+  }
+
+  const oobCode = extractOobCode(loginUrl);
+  return {
+    success: true,
+    email,
+    loginUrl,
+    oobCode,
+    message: "Magic Link login HP berhasil didapatkan!",
+  };
+}
+
+/**
+ * 14. Re-Aktivasi Akun Pro dari Sesi Tersimpan (Auto-Renew via Refresh Token)
+ * @param {string} email
+ * @returns {Promise<Object>}
+ */
+async function renewAccount(email, options = {}) {
+  if (!email || !email.includes("@")) {
+    throw new Error("Alamat email akun wajib disertakan.");
+  }
+
+  const account = getSavedAccount(email);
+  if (!account || !account.refreshToken) {
+    throw new Error(
+      `Akun "${email}" tidak ditemukan di storage lokal. Silakan aktivasi awal terlebih dahulu.`,
+    );
+  }
+
+  // Pastikan ID Token selalu fresh (auto-refresh jika kedaluwarsa)
+  const {
+    idToken: freshToken,
+    refreshToken: freshRefresh,
+    wasRefreshed,
+  } = await ensureFreshToken(account.idToken, account.refreshToken, email);
+  if (wasRefreshed) {
+    account.idToken = freshToken;
+    account.refreshToken = freshRefresh;
+  }
+
+  // Tembak applyPremium ulang
+  const applyRes = await applyPremium(freshToken, options);
+
+  // Cek license live
+  let liveLicense = null;
+  try {
+    liveLicense = await getLicenseStatus(freshToken);
+  } catch (_) {}
+
+  const isPro = liveLicense ? liveLicense.isPro : true;
+  const expiryDate = isPro
+    ? liveLicense?.expiresAt || account.expiresAt
+    : liveLicense?.expiresAt || null;
+  const benefits = isPro
+    ? liveLicense?.benefits?.length
+      ? liveLicense.benefits
+      : account.benefits || []
+    : [];
+
+  // Perbarui data tersimpan ke file asalnya (pro-accounts atau generated-accounts)
+  const updatedRecord = {
+    ...account,
+    idToken: freshToken,
+    refreshToken: freshRefresh,
+    isPro,
+    expiresAt: expiryDate,
+    benefits,
+    renewedAt: new Date().toISOString(),
+  };
+
+  if (account._storageType === "pro" || account.category === "pro") {
+    saveProAccount(email, updatedRecord);
+  } else {
+    saveGeneratedAccount(email, updatedRecord);
+  }
+
+  return {
+    success: isPro,
+    email: account.email,
+    message: isPro
+      ? `Akun "${email}" berhasil di-reaktivasi Pro!`
+      : `Gagal re-aktivasi: Akun "${email}" berstatus Free/Expired.`,
+    license: {
+      isPro,
+      expiresAt: expiryDate,
+      benefits,
+    },
+    orderId: applyRes?.orderId || null,
+    developer: OMNIFY_CREDITS.developer,
+    channel: OMNIFY_CREDITS.channel,
+  };
+}
+
+/**
+ * 15. Perpanjang / Re-Aktivasi Semua Akun Tersimpan Sekaligus (Batch Auto-Renew)
+ * @param {Object} [options]
+ * @returns {Promise<Object>}
+ */
+async function renewAllAccounts(options = {}) {
+  const accounts = loadAccounts("generated");
+  const emails = Object.keys(accounts);
+
+  if (emails.length === 0) {
+    return {
+      status: "empty",
+      total: 0,
+      successCount: 0,
+      failedCount: 0,
+      results: [],
+      message: "Tidak ada akun hasil generate yang tersimpan untuk di-renew.",
+    };
+  }
+
+  console.log(
+    `\n\x1b[1m\x1b[35m[*] Memulai Batch Auto-Renew untuk ${emails.length} akun user...\x1b[0m\n`,
+  );
+  const results = [];
+  let successCount = 0;
+  let failedCount = 0;
+
+  for (let i = 0; i < emails.length; i++) {
+    const email = emails[i];
+    process.stdout.write(
+      `  [${i + 1}/${emails.length}] Memperbarui "${email}"... `,
+    );
+    try {
+      const res = await renewAccount(email, options);
+      if (res.success && res.license?.isPro) {
+        successCount++;
+        console.log(
+          `\x1b[32m[✓ PRO AKTIF]\x1b[0m (Exp: \x1b[33m${res.license.expiresAt ? res.license.expiresAt.slice(0, 10) : "OK"}\x1b[0m)`,
+        );
+      } else {
+        failedCount++;
+        console.log(`\x1b[31m[✕ GAGAL]\x1b[0m (Lisensi Free/Expired)`);
+      }
+      results.push(res);
+    } catch (err) {
+      failedCount++;
+      console.log(`\x1b[31m[✕ ERROR]\x1b[0m (${err.message})`);
+      results.push({ email, success: false, error: err.message });
+    }
+  }
+
+  console.log(`\n\x1b[1m\x1b[32m=== RINGKASAN BATCH AUTO-RENEW ===\x1b[0m`);
+  console.log(`  Total Akun Diproses : \x1b[1m${emails.length}\x1b[0m`);
+  console.log(`  Berhasil Di-Renew   : \x1b[32m${successCount}\x1b[0m`);
+  console.log(`  Gagal / Expired     : \x1b[31m${failedCount}\x1b[0m\n`);
+
+  return {
+    status: "completed",
+    total: emails.length,
+    successCount,
+    failedCount,
+    results,
+  };
+}
+
+/**
+ * 15b. Batch Generate Akun Pro (N Akun Sekaligus)
+ * Generate beberapa akun Pro otomatis secara berurutan dengan progress report.
+ *
+ * @param {number} count - Jumlah akun yang ingin digenerate
+ * @param {Object} [options]
+ * @param {string} [options.provider='mailtm'] - 'mailtm' | 'generator.email'
+ * @param {string} [options.usernameType='random'] - 'default' | 'custom' | 'random'
+ * @param {string} [options.customUsername=''] - Prefix kustom (tiap akun ditambah nomor urut)
+ * @param {number} [options.delayBetweenMs=3000] - Jeda antar akun (ms)
+ * @param {Function} [options.onAccountProgress] - Callback per akun: (index, total, phase, msg)
+ * @param {Function} [options.onAccountDone] - Callback setelah tiap akun selesai: (index, total, result, error)
+ * @returns {Promise<{ total, successCount, failedCount, accounts: Array }>}
+ */
+async function batchGenerateProAccounts(count, options = {}) {
+  if (!count || count < 1) throw new Error("Jumlah akun minimal 1.");
+  // Validasi akun master dan purchase token SEBELUM memulai batch
+  ensureMasterAccountReady(options);
+  // Auto-Heartbeat & Background Refresh Akun Master Pro sebelum proses panjang
+  await heartbeatMasterSession({ silent: true }).catch(() => {});
+
+  const n = Math.min(count, 20);
+  const provider = options.provider || "mailtm";
+  const usernameType = options.usernameType || "random";
+  const customUsername = options.customUsername || "";
+
+  // Rate-limiting delay rule:
+  // Jika batch count >= 10 (10-20 akun), otomatis kenakan delay minimal 5000ms (5 detik) per akun
+  const isLargeBatch = n >= 10;
+  const configuredDelay = options.delayBetweenMs;
+  const effectiveDelay = isLargeBatch
+    ? Math.max(5000, configuredDelay ?? 5000)
+    : (configuredDelay ?? 3000);
+
+  if (isLargeBatch && typeof options.onAccountProgress === "function") {
+    options.onAccountProgress(
+      0,
+      n,
+      "notice",
+      `[!] Batch skala besar (${n} akun): Menerapkan jeda aman otomatis ${effectiveDelay / 1000}s per akun untuk mencegah rate-limit Cloud Functions/Firebase.`,
+    );
+  }
+
+  const results = [];
+  let successCount = 0;
+  let failedCount = 0;
+
+  for (let i = 0; i < n; i++) {
+    const label = `[${i + 1}/${n}]`;
+
+    if (typeof options.onAccountProgress === "function") {
+      options.onAccountProgress(
+        i + 1,
+        n,
+        "start",
+        `${label} Memulai generate akun...`,
+      );
+    }
+
+    // Untuk batch: jika custom, tambahkan nomor urut agar email unik
+    const batchUsername =
+      usernameType === "custom" && customUsername
+        ? `${customUsername}${i + 1}`
+        : customUsername;
+
+    const doGenerate = () =>
+      autoGenerateProAccount({
+        provider,
+        usernameType,
+        customUsername: batchUsername,
+        onProgress: (msg, isSuccess) => {
+          if (typeof options.onAccountProgress === "function") {
+            options.onAccountProgress(
+              i + 1,
+              n,
+              isSuccess ? "step_ok" : "step",
+              msg,
+            );
+          }
+        },
+      });
+
+    // 1 coba utama + 1 retry otomatis jika gagal
+    let result = null;
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        result = await doGenerate();
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (attempt === 0) {
+          const retryMsg = `${label} Gagal, retry dalam 3s... (${(err.message || "").slice(0, 50)})`;
+          if (typeof options.onAccountProgress === "function") {
+            options.onAccountProgress(i + 1, n, "retry", retryMsg);
+          }
+          await new Promise((r) => setTimeout(r, 3000));
+        }
+      }
+    }
+
+    if (result && result.isPro !== false) {
+      // Jika opsi generateMobileLinks aktif, otomatis dapatkan Link Login HP
+      if (options.generateMobileLinks) {
+        try {
+          const accEmail =
+            result.tempMail?.email || result.user?.email || result.email;
+          if (accEmail) {
+            if (typeof options.onAccountProgress === "function") {
+              options.onAccountProgress(
+                i + 1,
+                n,
+                "step",
+                `Mengekstrak Link Login HP untuk "${accEmail}"...`,
+              );
+            }
+            const hpRes = await getMobileLoginLink(accEmail, {
+              provider: result.tempMail?.provider || provider,
+              token: result.tempMail?.token,
+            });
+            if (hpRes.success && hpRes.loginUrl) {
+              result.mobileLoginUrl = hpRes.loginUrl;
+              if (typeof options.onAccountProgress === "function") {
+                options.onAccountProgress(
+                  i + 1,
+                  n,
+                  "step_ok",
+                  `Link HP siap: ${hpRes.loginUrl.slice(0, 50)}...`,
+                );
+              }
+            }
+          }
+        } catch (_) {}
+      }
+
+      results.push({ index: i + 1, success: true, account: result });
+      successCount++;
+      if (typeof options.onAccountDone === "function") {
+        options.onAccountDone(i + 1, n, result, null);
+      }
+    } else {
+      const errMsg =
+        lastErr?.response?.data?.error?.message ||
+        lastErr?.message ||
+        "Unknown error";
+      results.push({ index: i + 1, success: false, error: errMsg });
+      failedCount++;
+      if (typeof options.onAccountDone === "function") {
+        options.onAccountDone(i + 1, n, null, errMsg);
+      }
+    }
+
+    // Delay antar akun (kecuali akun terakhir)
+    if (i < n - 1 && effectiveDelay > 0) {
+      if (typeof options.onAccountProgress === "function") {
+        options.onAccountProgress(
+          i + 1,
+          n,
+          "delay",
+          `Menunggu ${effectiveDelay / 1000}s sebelum akun berikutnya...`,
+        );
+      }
+      await new Promise((r) => setTimeout(r, effectiveDelay));
+    }
+  }
+
+  return {
+    total: n,
+    successCount,
+    failedCount,
+    accounts: results,
+  };
+}
+
+/**
+ * 15. Download & Ekstrak Preset XML & Lagu MP3 dari alight.link (100% Native)
+ * Mendukung opsi auto-download berkas fisik ke disk (--download)
+ *
+ * @param {string} alightUrl - URL preset
+ * @param {Object} [options] - { download: boolean, outputDir: string }
+ * @returns {Promise<Object>}
+ */
+async function downloadPreset(alightUrl, options = {}) {
+  if (!alightUrl || !alightUrl.includes("alight")) {
+    throw new Error(
+      "URL preset Alight Motion (alight.link atau alightcreative.com) wajib disertakan.",
+    );
+  }
+
+  const cleanUrl = alightUrl.trim();
+
+  const res = await axios.get(cleanUrl, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+    },
+    maxRedirects: 5,
+    timeout: 15000,
+  });
+
+  const html = res.data;
+  const finalUrl = res.request?.res?.responseUrl || cleanUrl;
+  const $ = cheerio.load(html);
+
+  const title =
+    $('meta[property="og:title"]').attr("content") ||
+    $("title").text() ||
+    "Alight Motion Preset";
+  const description =
+    $('meta[property="og:description"]').attr("content") || "";
+  const thumbnail = $('meta[property="og:image"]').attr("content") || null;
+
+  let xmlDownloadUrl = null;
+  let audioDownloadUrl = null;
+  let packageId = null;
+
+  const intentMatch = html.match(
+    /intent:\/\/alightcreative\.com\/am\/share\/u\/([^\/]+)\/p\/([^\?#"']+)/,
+  );
+  if (intentMatch) {
+    packageId = intentMatch[2];
+  }
+
+  const storageMatches =
+    html.match(
+      /https:\/\/storage\.googleapis\.com\/bsp-alight-creative-cms-public\/[^\s"'<>()]+/g,
+    ) || [];
+  if (storageMatches.length > 0) {
+    xmlDownloadUrl = storageMatches[0];
+  }
+
+  const audioMatches =
+    html.match(/https:\/\/[^\s"'<>]+\.(?:mp3|m4a|wav|aac)/gi) || [];
+  if (audioMatches.length > 0) {
+    audioDownloadUrl = audioMatches[0];
+  }
+
+  const result = {
+    status: "success",
+    title: title.replace(/\s+/g, " ").trim(),
+    description: description.trim(),
+    thumbnail,
+    shareUrl: finalUrl,
+    packageId: packageId || "N/A",
+    xmlDownloadUrl: xmlDownloadUrl || finalUrl,
+    audioDownloadUrl: audioDownloadUrl || null,
+    developer: OMNIFY_CREDITS.developer,
+    channel: OMNIFY_CREDITS.channel,
+  };
+
+  // Unduh fisik jika diminta flag --download / --save / options.download
+  const shouldDownload =
+    options.download ||
+    process.argv.includes("--download") ||
+    process.argv.includes("--save") ||
+    process.env.npm_config_download === "true";
+
+  if (shouldDownload) {
+    const outDir =
+      options.outputDir ||
+      path.join(process.cwd(), "downloads", "alightmotion");
+    if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+
+    const safeTitle =
+      title
+        .replace(/[/\\?%*:|"<>]/g, "_")
+        .trim()
+        .slice(0, 80) || "alight_preset";
+    result.saved_files = {};
+
+    if (xmlDownloadUrl && xmlDownloadUrl.startsWith("http")) {
+      try {
+        const xmlPath = path.join(outDir, `${safeTitle}.xml`);
+        const xmlResp = await axios.get(xmlDownloadUrl, {
+          responseType: "arraybuffer",
+          timeout: 25000,
+        });
+        fs.writeFileSync(xmlPath, xmlResp.data);
+        result.saved_files.xml = xmlPath;
+      } catch (err) {
+        result.saved_files.xmlError = err.message;
+      }
+    }
+
+    if (audioDownloadUrl && audioDownloadUrl.startsWith("http")) {
+      try {
+        const ext = audioDownloadUrl.split(".").pop()?.split("?")[0] || "mp3";
+        const audioPath = path.join(outDir, `${safeTitle}.${ext}`);
+        const audioResp = await axios.get(audioDownloadUrl, {
+          responseType: "arraybuffer",
+          timeout: 35000,
+        });
+        fs.writeFileSync(audioPath, audioResp.data);
+        result.saved_files.audio = audioPath;
+      } catch (err) {
+        result.saved_files.audioError = err.message;
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Helper Input Terminal
+ */
+function promptInput(questionText) {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+    rl.question(questionText, (ans) => {
+      rl.close();
+      resolve(ans.trim());
+    });
+  });
+}
+
+/**
+ * Menu Interaktif CLI (Continuous Loop Mode)
+ */
+async function runInteractiveMenu() {
+  // Auto-Heartbeat & Background Refresh Akun Master Pro (Setiap 5 menit, unref agar tidak menahan proses exit)
+  const masterHeartbeatInterval = setInterval(async () => {
+    try {
+      await heartbeatMasterSession({ silent: true });
+    } catch (_) {}
+  }, 5 * 60 * 1000);
+  if (masterHeartbeatInterval.unref) masterHeartbeatInterval.unref();
+
+  while (true) {
+    // Jalankan auto-heartbeat & refresh jika token master mendekati expired sebelum render menu
+    await heartbeatMasterSession({ silent: true }).catch(() => {});
+
+    printOmnifyBanner();
+    const masterStatus = getMasterAccountStatus();
+    const countLabel =
+      masterStatus.count > 0
+        ? ` (${masterStatus.count} Akun Terdaftar)`
+        : "";
+    const masterBadge = masterStatus.ready
+      ? `\x1b[32m[✓ MASTER PRO AKTIF${countLabel}]\x1b[0m`
+      : `\x1b[31m[✕ MASTER BELUM TERDAFTAR / BUKAN PRO — DAFTARKAN DI MENU 3]\x1b[0m`;
+
+    console.log(
+      `\x1b[1m\x1b[33m=== MENU INTERAKTIF ALIGHT MOTION PRO (OMNIFYLABS) ===\x1b[0m`,
+    );
+    console.log(`  Status Master : ${masterBadge}\n`);
+    console.log(
+      `  \x1b[32m[0]\x1b[0m ⚡ \x1b[1mBatch Generate (N Akun Sekaligus)\x1b[0m`,
+    );
+    console.log(
+      `  \x1b[32m[1]\x1b[0m 🚀 \x1b[1mAuto-Generate Akun Pro Instan (1-Klik Terima Beres)\x1b[0m`,
+    );
+    console.log(
+      `  \x1b[32m[2]\x1b[0m ✍️  Buat Akun Pro Manual (Input Email Sendiri -> Tempel Link)`,
+    );
+    console.log(
+      `  \x1b[32m[3]\x1b[0m 👑 Daftarkan Akun Master Pro (Input Email -> Tempel Link -> Selesai)`,
+    );
+    console.log(
+      `  \x1b[32m[4]\x1b[0m 🔍 Cek Status & Lisensi Akun Master Pro (Live)`,
+    );
+    console.log(
+      `  \x1b[32m[5]\x1b[0m 🔄 Re-Aktivasi Akun Tersimpan (Auto-Renew via Token)`,
+    );
+    console.log(`  \x1b[32m[6]\x1b[0m 📋 Lihat Daftar Akun Pro Tersimpan`);
+    console.log(
+      `  \x1b[32m[7]\x1b[0m 🔍 Cek Status Lisensi Akun Tersimpan / Manual`,
+    );
+    console.log(
+      `  \x1b[32m[8]\x1b[0m 📦 Download Preset XML & Audio (alight.link)`,
+    );
+    console.log(`  \x1b[31m[9]\x1b[0m 🚪 Keluar (atau tekan Ctrl+C)\n`);
+
+    const choice = await promptInput("\x1b[36mPilih opsi [0-9]:\x1b[0m ");
+
+    if (
+      choice === "9" ||
+      choice.toLowerCase() === "exit" ||
+      choice.toLowerCase() === "q"
+    ) {
+      clearInterval(masterHeartbeatInterval);
+      console.log(
+        "\n\x1b[32m[✓] Terima kasih telah menggunakan Alight Motion Pro Suite!\x1b[0m\n",
+      );
+      break;
+    }
+
+    // Validasi Akun Master langsung saat opsi dipilih (Opsi 0, 1, 2, 5)
+    if (["0", "1", "2", "5"].includes(choice)) {
+      if (!masterStatus.ready) {
+        console.log(
+          `\n\x1b[1m\x1b[31m=== [✕] FITUR DIBLOKIR: AKUN MASTER PRO BELUM TERSEDIA ===\x1b[0m`,
+        );
+        console.log(`  \x1b[33m[!] Status : ${masterStatus.reason}\x1b[0m`);
+        console.log(
+          `  \x1b[90mFitur ini memerlukan Akun Master yang sudah memiliki lisensi Pro aktif & Purchase Token Play Store untuk mengaktifkan akun lainnya.\x1b[0m`,
+        );
+        console.log(
+          `\n👉 \x1b[1m\x1b[32mLangkah Pertama:\x1b[0m Silakan daftarkan Akun Master Pro Anda melalui menu \x1b[1m\x1b[32m[3] 👑 Daftarkan Akun Master Pro\x1b[0m terlebih dahulu.\n`,
+        );
+        await promptInput(
+          "\x1b[90mTekan [Enter] untuk kembali ke menu utama...\x1b[0m",
+        );
+        continue;
+      }
+    }
+
+    try {
+      // 1. Auto-Generate Akun Pro Instan (1-Klik Temp Mail -> Auto Read Inbox -> Terima Beres)
+      if (choice === "1") {
+        console.log(
+          `\n\x1b[1m\x1b[33m--- 🚀 AUTO-GENERATE AKUN PRO INSTAN (1-KLIK TERIMA BERES) ---\x1b[0m`,
+        );
+        console.log(`Pilih Provider Temp Mail:`);
+        console.log(
+          `  \x1b[32m[1]\x1b[0m ⚡ \x1b[1mMail.tm\x1b[0m (Rekomendasi)`,
+        );
+        console.log(
+          `  \x1b[36m[2]\x1b[0m 🌐 \x1b[1mGenerator.email\x1b[0m (Random Domain)`,
+        );
+        console.log(
+          `  \x1b[90m(Tekan Enter langsung untuk memakai Mail.tm)\x1b[0m\n`,
+        );
+
+        const pChoice = await promptInput(
+          "\x1b[36mPilih provider [1-2] (default: 1):\x1b[0m ",
+        );
+        const selectedProvider = pChoice === "2" ? "generator.email" : "mailtm";
+
+        console.log(`\nPilihan Username Email:`);
+        console.log(
+          `  \x1b[32m[1]\x1b[0m 🏷️  \x1b[1mDefault\x1b[0m (omnifylabs_xxxx)`,
+        );
+        console.log(
+          `  \x1b[36m[2]\x1b[0m ✍️  \x1b[1mKustom Nama\x1b[0m (isi manual, jika kosong otomatis omnifylabs)`,
+        );
+        console.log(
+          `  \x1b[35m[3]\x1b[0m 🎲  \x1b[1mRandom Nama\x1b[0m (string acak)`,
+        );
+        console.log(`  \x1b[90m(Tekan Enter langsung untuk Default)\x1b[0m\n`);
+
+        const uChoice = await promptInput(
+          "\x1b[36mPilih opsi username [1-3] (default: 1):\x1b[0m ",
+        );
+
+        let usernameType = "default";
+        let customUsername = "";
+
+        if (uChoice === "2") {
+          usernameType = "custom";
+          const inputName = await promptInput(
+            "\x1b[33mMasukkan Kustom Nama (kosongkan untuk omnifylabs):\x1b[0m ",
+          );
+          customUsername = inputName.trim();
+          if (!customUsername) {
+            console.log(
+              `  \x1b[90m[i] Nama tidak diisi, otomatis menggunakan prefix default "omnifylabs".\x1b[0m`,
+            );
+          }
+        } else if (uChoice === "3") {
+          usernameType = "random";
+        }
+
+        console.log(
+          `\n\x1b[35m[*] Memulai proses otomatis 1-Klik (${selectedProvider})...\x1b[0m\n`,
+        );
+
+        const res = await autoGenerateProAccount({
+          provider: selectedProvider,
+          usernameType,
+          customUsername,
+          onProgress: (msg, isSuccess) => {
+            if (isSuccess) {
+              console.log(`  \x1b[32m${msg}\x1b[0m`);
+            } else {
+              console.log(`  \x1b[35m${msg}\x1b[0m`);
+            }
+          },
+        });
+
+        printAccountCard(res, {
+          title: "AKUN PRO OTOMATIS BERHASIL DIAKTIFKAN (1-CLICK AUTO)!",
+          type: "success",
+          emailLabel: "Email Temp",
+          fileNote: "Tersimpan di storage/alightmotion/generated-accounts.json",
+        });
+
+        const tempEmail = res.email || res.tempMail?.email;
+        const prov = res.tempMail?.provider || selectedProvider;
+
+        console.log(
+          `\n\x1b[1m\x1b[36m📱 CARA LOGIN DI APLIKASI ALIGHT MOTION (HP):\x1b[0m`,
+        );
+        console.log(
+          `  1. Buka aplikasi Alight Motion di HP -> Profil -> Masuk dengan Email.`,
+        );
+        console.log(`  2. Masukkan email : \x1b[1m\x1b[33m${tempEmail}\x1b[0m`);
+        if (prov === "generator.email" || !res.tempMail?.password) {
+          console.log(
+            `  3. Buka web inbox : \x1b[36mhttps://generator.email/${tempEmail}\x1b[0m`,
+          );
+          console.log(
+            `  4. Klik "Sign in to Alight Creative" -> Aplikasi HP otomatis terbuka & login PRO! ⭐`,
+          );
+        } else {
+          console.log(
+            `  3. Buka web inbox : \x1b[36mhttps://mail.tm\x1b[0m (Password: \x1b[33m${res.tempMail.password}\x1b[0m)`,
+          );
+          console.log(
+            `  4. Buka email dari Alight Creative -> Klik tombol login.`,
+          );
+        }
+
+        const askHp = await promptInput(
+          `\n\x1b[32m[?] Mau langsung buatkan Link Login instan untuk HP sekarang (tinggal tap di HP)? (Y/n): \x1b[0m`,
+        );
+        if (askHp.toLowerCase() !== "n") {
+          console.log(
+            `\n\x1b[35m[*] Mengirim Magic Link login baru & mengekstrak link untuk HP...\x1b[0m`,
+          );
+          const hpRes = await getMobileLoginLink(tempEmail, {
+            provider: prov,
+            token: res.tempMail?.token,
+            onProgress: (m, ok) =>
+              console.log(
+                ok ? `  \x1b[32m[✓] ${m}\x1b[0m` : `  \x1b[35m[*] ${m}\x1b[0m`,
+              ),
+          });
+
+          if (hpRes.success && hpRes.loginUrl) {
+            console.log(
+              `\n\x1b[1m\x1b[32m=== [✓] LINK LOGIN HP SIAP (Tinggal Tap di HP) ===\x1b[0m`,
+            );
+            console.log(`\x1b[1m\x1b[33m${hpRes.loginUrl}\x1b[0m\n`);
+            console.log(
+              `\x1b[90m👉 Salin link di atas ke HP Anda (WA/Telegram/Browser HP).`,
+            );
+            console.log(
+              `   Begitu link diklik di HP, aplikasi Alight Motion akan otomatis terbuka dan langsung aktif PRO! ⭐\x1b[0m\n`,
+            );
+          } else {
+            console.log(`\x1b[33m[!] ${hpRes.message}\x1b[0m\n`);
+          }
+        }
+      }
+
+      // 0. Batch Generate Akun Pro (N Akun Sekaligus)
+      else if (choice === "0") {
+        console.log(
+          `\n\x1b[1m\x1b[33m--- ⚡ BATCH GENERATE AKUN PRO (N AKUN SEKALIGUS) ---\x1b[0m`,
+        );
+
+        const countInput = await promptInput(
+          "\x1b[36mBerapa akun yang ingin digenerate? (1-20, default: 3): \x1b[0m",
+        );
+        const batchCount = Math.max(
+          1,
+          Math.min(20, parseInt(countInput, 10) || 3),
+        );
+
+        if (batchCount >= 10) {
+          console.log(
+            `\x1b[33m[!] Catatan: Jumlah akun >= 10 (${batchCount} akun) otomatis menerapkan delay aman 5 detik per akun untuk mencegah rate-limit.\x1b[0m`,
+          );
+        }
+
+        console.log(`\nPilih Provider Temp Mail:`);
+        console.log(
+          `  \x1b[32m[1]\x1b[0m ⚡ \x1b[1mMail.tm\x1b[0m (Rekomendasi)`,
+        );
+        console.log(
+          `  \x1b[36m[2]\x1b[0m 🌐 \x1b[1mGenerator.email\x1b[0m (Random Domain)`,
+        );
+        const bpChoice = await promptInput(
+          "\x1b[36mPilih provider [1-2] (default: 1): \x1b[0m",
+        );
+        const batchProvider = bpChoice === "2" ? "generator.email" : "mailtm";
+
+        console.log(`\nPilihan Username Email:`);
+        console.log(
+          `  \x1b[32m[1]\x1b[0m 🎲 Random Nama (default, direkomendasikan untuk batch)`,
+        );
+        console.log(
+          `  \x1b[36m[2]\x1b[0m ✍️  Kustom Prefix (mis: "myuser" → myuser1, myuser2, ...)`,
+        );
+        const buChoice = await promptInput(
+          "\x1b[36mPilih opsi username [1-2] (default: 1): \x1b[0m",
+        );
+
+        let batchUsernameType = "random";
+        let batchCustomUsername = "";
+        if (buChoice === "2") {
+          const inp = await promptInput(
+            "\x1b[33mMasukkan Prefix Kustom (kosong = omnifylabs): \x1b[0m",
+          );
+          batchUsernameType = "custom";
+          batchCustomUsername = inp.trim() || "omnifylabs";
+        }
+
+        console.log(`\nPilihan Link Login HP (Tinggal Tap):`);
+        console.log(
+          `  \x1b[32m[1]\x1b[0m 📱 \x1b[1mYa, otomatis buat Link Login HP sekaligus\x1b[0m (Rekomendasi, tinggal tap di HP langsung Pro)`,
+        );
+        console.log(
+          `  \x1b[90m[2] ⏩ Lewati pembuatan link HP (Hanya buat akun Pro)\x1b[0m`,
+        );
+        const hpChoice = await promptInput(
+          "\x1b[36mBuat Link Login HP sekaligus? [1-2] (default: 1): \x1b[0m",
+        );
+        const autoGenHpLinks = hpChoice !== "2";
+
+        console.log(
+          `\n\x1b[35m[*] Memulai batch generate \x1b[1m${batchCount} akun\x1b[0m\x1b[35m via ${batchProvider}...\x1b[0m\n`,
+        );
+
+        const batchRes = await batchGenerateProAccounts(batchCount, {
+          provider: batchProvider,
+          usernameType: batchUsernameType,
+          customUsername: batchCustomUsername,
+          onAccountProgress: (idx, total, phase, msg) => {
+            if (phase === "start") {
+              console.log(`\n\x1b[1m\x1b[36m[Akun ${idx}/${total}]\x1b[0m`);
+            } else if (phase === "step_ok") {
+              console.log(`  \x1b[32m${msg}\x1b[0m`);
+            } else if (phase === "step") {
+              console.log(`  \x1b[35m${msg}\x1b[0m`);
+            } else if (phase === "retry") {
+              console.log(`  \x1b[33m⚠ ${msg}\x1b[0m`);
+            } else if (phase === "delay") {
+              console.log(`  \x1b[90m⏳ ${msg}\x1b[0m`);
+            } else if (phase === "notice") {
+              console.log(`  \x1b[33m${msg}\x1b[0m`);
+            }
+          },
+          onAccountDone: (idx, total, result, err) => {
+            if (err) {
+              console.log(
+                `  \x1b[31m[✕] Akun ${idx}/${total} GAGAL: ${err}\x1b[0m`,
+              );
+            } else {
+              const email =
+                result?.tempMail?.email || result?.user?.email || "?";
+              const expiry = result?.license?.expiresAt
+                ? result.license.expiresAt.slice(0, 10)
+                : "OK";
+              console.log(
+                `  \x1b[32m[✓] Akun ${idx}/${total} PRO AKTIF ⭐ → ${email} (Exp: ${expiry})\x1b[0m`,
+              );
+            }
+          },
+        });
+
+        console.log(
+          `\n\x1b[1m\x1b[32m=== [✓] BATCH GENERATE SELESAI ===\x1b[0m`,
+        );
+        console.log(`  Total   : \x1b[1m${batchRes.total}\x1b[0m akun`);
+        console.log(
+          `  Berhasil: \x1b[32m${batchRes.successCount}\x1b[0m akun PRO AKTIF ⭐`,
+        );
+        if (batchRes.failedCount > 0) {
+          console.log(
+            `  Gagal   : \x1b[31m${batchRes.failedCount}\x1b[0m akun`,
+          );
+        }
+        console.log(
+          `\x1b[90m  Data tersimpan di: storage/alightmotion/generated-accounts.json\x1b[0m\n`,
+        );
+
+        // Auto-Generate Link Login HP Sekaligus jika diminta
+        const successfulAccounts = batchRes.accounts
+          .filter((a) => a.success && a.account)
+          .map((a) => a.account);
+
+        if (autoGenHpLinks && successfulAccounts.length > 0) {
+          console.log(
+            `\n\x1b[1m\x1b[36m=== 📱 AUTO-GENERATE LINK LOGIN HP SEKALIGUS (${successfulAccounts.length} AKUN) ===\x1b[0m`,
+          );
+          console.log(
+            `\x1b[90mMengirim Magic Link & mengekstrak link verifikasi HP untuk semua akun...\x1b[0m\n`,
+          );
+
+          const hpLinksList = [];
+          for (let k = 0; k < successfulAccounts.length; k++) {
+            const acc = successfulAccounts[k];
+            const accEmail =
+              acc.tempMail?.email || acc.user?.email || acc.email;
+            const prov = acc.tempMail?.provider || batchProvider;
+            const token = acc.tempMail?.token || null;
+
+            process.stdout.write(
+              `  [${k + 1}/${successfulAccounts.length}] Mengambil Link HP untuk "${accEmail}"... `,
+            );
+
+            try {
+              const hpRes = await getMobileLoginLink(accEmail, {
+                provider: prov,
+                token: token,
+              });
+
+              if (hpRes.success && hpRes.loginUrl) {
+                acc.mobileLoginUrl = hpRes.loginUrl;
+                hpLinksList.push({
+                  email: accEmail,
+                  loginUrl: hpRes.loginUrl,
+                  status: "OK",
+                });
+                console.log(`\x1b[32m[✓ SIAP]\x1b[0m`);
+              } else {
+                hpLinksList.push({
+                  email: accEmail,
+                  loginUrl: null,
+                  status: hpRes.message || "Gagal",
+                });
+                console.log(`\x1b[33m[!] (${hpRes.message || "Gagal"})\x1b[0m`);
+              }
+            } catch (err) {
+              hpLinksList.push({
+                email: accEmail,
+                loginUrl: null,
+                status: err.message,
+              });
+              console.log(`\x1b[31m[✕ ERROR]\x1b[0m (${err.message})`);
+            }
+
+            if (k < successfulAccounts.length - 1) {
+              await new Promise((r) => setTimeout(r, 2000));
+            }
+          }
+
+          // Tampilkan rekap rapi
+          console.log(
+            `\n\x1b[1m\x1b[32m=================================================================\x1b[0m`,
+          );
+          console.log(
+            `\x1b[1m\x1b[32m📱 DAFTAR LINK LOGIN HP PRO ALIGHT MOTION (TINGGAL TAP DI HP)\x1b[0m`,
+          );
+          console.log(
+            `\x1b[1m\x1b[32m=================================================================\x1b[0m`,
+          );
+          hpLinksList.forEach((item, idx) => {
+            console.log(
+              `\n\x1b[1m\x1b[36m[${idx + 1}] Email   :\x1b[0m \x1b[1m\x1b[33m${item.email}\x1b[0m`,
+            );
+            if (item.loginUrl) {
+              console.log(
+                `    \x1b[1m\x1b[32mLink HP :\x1b[0m \x1b[4m${item.loginUrl}\x1b[0m`,
+              );
+            } else {
+              console.log(`    \x1b[31mStatus  : ${item.status}\x1b[0m`);
+            }
+          });
+          console.log(
+            `\n\x1b[1m\x1b[32m=================================================================\x1b[0m\n`,
+          );
+
+          // Simpan file export
+          try {
+            const exportsDir = path.join(SESSION_DIR, "exports");
+            if (!fs.existsSync(exportsDir)) {
+              fs.mkdirSync(exportsDir, { recursive: true });
+            }
+            const dateStr = new Date()
+              .toISOString()
+              .slice(0, 19)
+              .replace(/[:T]/g, "-");
+            const exportFilePath = path.join(
+              exportsDir,
+              `batch-hp-links-${dateStr}.txt`,
+            );
+            let fileContent = `=== ALIGHT MOTION PRO - BATCH MOBILE LOGIN LINKS ===\nGenerated At: ${new Date().toISOString()}\nTotal: ${hpLinksList.length}\n\n`;
+            hpLinksList.forEach((item, idx) => {
+              fileContent += `[${idx + 1}] Email   : ${item.email}\n`;
+              fileContent += `    Link HP : ${item.loginUrl || item.status}\n\n`;
+            });
+            fs.writeFileSync(exportFilePath, fileContent, "utf8");
+            console.log(
+              `\x1b[90m[💾] Rekap link HP berhasil diekspor ke: ${path.relative(process.cwd(), exportFilePath)}\x1b[0m\n`,
+            );
+          } catch (_) {}
+        }
+      }
+
+      // 2. Buat Akun Pro Manual untuk User (Input Email -> Kirim Link -> Tempel Link -> Aktif)
+      else if (choice === "2") {
+        console.log(
+          `\n\x1b[1m\x1b[33m--- AKTIVASI AKUN PRO MANUAL (INPUT EMAIL SENDIRI) ---\x1b[0m`,
+        );
+        const email = await promptInput("\x1b[36mMasukkan Email User:\x1b[0m ");
+        if (!email || !email.includes("@")) {
+          console.log(
+            "\x1b[33m[!] Dibatalkan: Format email tidak valid atau kosong.\x1b[0m",
+          );
+        } else {
+          const hasLink = await promptInput(
+            "\x1b[90mSudah punya link OOB di inbox email Anda? (y/N): \x1b[0m",
+          );
+          if (hasLink.toLowerCase() !== "y") {
+            console.log(
+              `\n\x1b[35m[*] Mengirim Magic Link login resmi ke "${email}"...\x1b[0m`,
+            );
+            const resSend = await sendMagicLink(email);
+            console.log(`\x1b[32m[✓] ${resSend.message}\x1b[0m`);
+            console.log(
+              `\x1b[90mSilakan buka inbox email user, salin link login-nya, lalu paste di bawah.\x1b[0m`,
+            );
+          } else {
+            console.log(
+              `\x1b[90mSilakan salin link yang sudah ada di inbox email Anda.\x1b[0m`,
+            );
+          }
+          console.log(
+            `\x1b[90m(Ketik "batal" atau "q" untuk membatalkan)\x1b[0m\n`,
+          );
+
+          const link = await promptInput(
+            "\x1b[33mTempel Link OOB dari Email User:\x1b[0m ",
+          );
+          if (
+            !link ||
+            link.toLowerCase() === "batal" ||
+            link.toLowerCase() === "q"
+          ) {
+            console.log("\x1b[33m[!] Pembuatan akun Pro dibatalkan.\x1b[0m");
+          } else {
+            console.log(
+              `\n\x1b[35m[*] Memverifikasi akun & mengaktifkan status Pro (${OMNIFY_CREDITS.brand})...\x1b[0m`,
+            );
+            const res = await generateProAccount(email, link);
+            if (!res.success || !res.license?.isPro) {
+              printAccountCard(res, {
+                title: "GAGAL AKTIVASI PRO: LISENSI TETAP FREE",
+                type: "error",
+                emailLabel: "Email User",
+                note:
+                  res.applyError ||
+                  "Akun tidak berhasil diaktifkan Pro oleh server Alight.",
+                fileNote:
+                  "Disimpan di storage/alightmotion/generated-accounts.json",
+              });
+            } else {
+              printAccountCard(res, {
+                title: "AKUN USER BERHASIL DIAKTIFKAN PRO!",
+                type: "success",
+                emailLabel: "Email User",
+                fileNote:
+                  "Tersimpan di storage/alightmotion/generated-accounts.json",
+              });
+            }
+          }
+        }
+      }
+
+      // 3. Daftarkan Akun Master Pro (All-in-One: Input Email -> Kirim Link -> Tempel Link -> Selesai)
+      else if (choice === "3") {
+        console.log(
+          `\n\x1b[1m\x1b[33m--- DAFTARKAN AKUN MASTER PRO (ALL-IN-ONE) ---\x1b[0m`,
+        );
+        const email = await promptInput(
+          "\x1b[36mMasukkan Email Master Pro Anda:\x1b[0m ",
+        );
+        if (!email || !email.includes("@")) {
+          console.log(
+            "\x1b[33m[!] Dibatalkan: Format email tidak valid atau kosong.\x1b[0m",
+          );
+        } else {
+          const hasLink = await promptInput(
+            "\x1b[90mSudah punya link OOB di inbox email Anda? (y/N): \x1b[0m",
+          );
+          if (hasLink.toLowerCase() !== "y") {
+            console.log(
+              `\n\x1b[35m[*] Mengirim Magic Link login resmi ke "${email}"...\x1b[0m`,
+            );
+            const resSend = await sendMagicLink(email);
+            console.log(`\x1b[32m[✓] ${resSend.message}\x1b[0m`);
+            console.log(
+              `\x1b[90mSilakan buka inbox email master, salin link login-nya, lalu paste di bawah.\x1b[0m`,
+            );
+          } else {
+            console.log(
+              `\x1b[90mSilakan salin link yang sudah ada di inbox email Anda.\x1b[0m`,
+            );
+          }
+          console.log(
+            `\x1b[90m(Ketik "batal" atau "q" untuk membatalkan)\x1b[0m\n`,
+          );
+
+          const link = await promptInput(
+            "\x1b[33mTempel Link OOB dari Email Master:\x1b[0m ",
+          );
+          if (
+            !link ||
+            link.toLowerCase() === "batal" ||
+            link.toLowerCase() === "q"
+          ) {
+            console.log(
+              "\x1b[33m[!] Pendaftaran akun master dibatalkan.\x1b[0m",
+            );
+          } else {
+            console.log(
+              `\n\x1b[35m[*] Memverifikasi akun master & auto-check lisensi Pro ke server Alight Creative...\x1b[0m`,
+            );
+            const res = await setMasterAccount(email, link);
+            if (!res.success || !res.master?.isPro) {
+              printAccountCard(res.master, {
+                title: "PENDAFTARAN DITOLAK: AKUN BUKAN PRO!",
+                type: "error",
+                emailLabel: "Email Master",
+                note:
+                  res.message ||
+                  "Akun ini berstatus Free. Hanya akun yang memiliki langganan Pro aktif yang dapat didaftarkan sebagai Akun Master!",
+                fileNote:
+                  "Tidak disimpan (Akun master sebelumnya tidak diubah)",
+              });
+            } else {
+              printAccountCard(res.master, {
+                title: "AKUN MASTER BERHASIL DIDAFTARKAN & TERVERIFIKASI PRO!",
+                type: "success",
+                emailLabel: "Email Master",
+                fileNote:
+                  "Tersimpan di storage/alightmotion/master-session.json & pro-accounts.json",
+              });
+              console.log(
+                `\n\x1b[1m\x1b[32m[✓] SUKSES! Akun Master Pro aktif. Semua fitur generate Pro kini terbuka!\x1b[0m\n`,
+              );
+            }
+          }
+        }
+      }
+
+      // 4. Cek Status & Info Lengkap Akun Master Pro
+      else if (choice === "4") {
+        const master = loadMasterSession();
+        if (!master || !master.refreshToken) {
+          console.log(
+            `\n\x1b[33m[!] Belum ada Akun Master terdaftar di storage.\x1b[0m`,
+          );
+          console.log(
+            `\x1b[90mTip: Pilih opsi [3] untuk mendaftarkan akun master Pro Anda (Input Email -> Tempel Link -> Selesai).\x1b[0m`,
+          );
+        } else {
+          console.log(
+            `\n\x1b[35m[*] Memeriksa lisensi realtime Akun Master (${master.email})...\x1b[0m`,
+          );
+          let refreshed = null;
+          try {
+            refreshed = await refreshMasterSession();
+          } catch (errRefresh) {
+            console.log(
+              `\n\x1b[31m[!] Gagal merefresh sesi akun master: ${errRefresh.response?.data?.error?.message || errRefresh.message}\x1b[0m`,
+            );
+          }
+
+          if (refreshed) {
+            let license = null;
+            try {
+              license = await getLicenseStatus(refreshed.idToken);
+            } catch (e) {
+              license = { isPro: false, error: e.message };
+            }
+
+            printAccountCard(
+              {
+                ...refreshed,
+                licenseExpires: license?.expiresAt || master.licenseExpires,
+                benefits: license?.benefits || master.benefits,
+                isPro: license?.isPro,
+              },
+              {
+                title: "INFORMASI LENGKAP AKUN MASTER PRO",
+                type: license?.isPro ? "success" : "error",
+                emailLabel: "Email Master",
+                fileNote: "storage/alightmotion/master-session.json",
+              },
+            );
+
+            const actionDel = await promptInput(
+              '\n\x1b[90mKetik "hapus" jika ingin mereset sesi master (atau tekan Enter untuk kembali): \x1b[0m',
+            );
+            if (actionDel.toLowerCase() === "hapus") {
+              if (fs.existsSync(MASTER_SESSION_FILE)) {
+                fs.unlinkSync(MASTER_SESSION_FILE);
+                console.log(
+                  `\x1b[32m[✓] Sesi akun master berhasil dihapus dari storage.\x1b[0m`,
+                );
+              }
+            }
+          }
+        }
+      }
+
+      // 5. Re-Aktivasi Akun Tersimpan (Mendukung Batch Auto-Renew Sekaligus)
+      else if (choice === "5") {
+        const accounts = loadAccounts("generated");
+        const list = Object.keys(accounts);
+        if (list.length === 0) {
+          console.log(
+            "\n\x1b[33m[!] Belum ada akun user hasil generate tersimpan di storage.\x1b[0m",
+          );
+          console.log(
+            "\x1b[90mTip: Gunakan opsi [1] untuk membuat akun Pro otomatis secara instan.\x1b[0m",
+          );
+        } else {
+          console.log(
+            "\n\x1b[1m\x1b[33m--- RE-AKTIVASI AKUN TERSIMPAN (AUTO-RENEW) ---\x1b[0m",
+          );
+          console.log(
+            `  \x1b[35m[A]\x1b[0m ⚡ \x1b[1mPERPANJANG SEMUA AKUN (BATCH AUTO-RENEW)\x1b[0m`,
+          );
+          list.forEach((em, i) =>
+            console.log(
+              `  \x1b[32m[${i + 1}]\x1b[0m ${em} (${accounts[em].isPro ? "Pro" : "Expired"})`,
+            ),
+          );
+          console.log(`  \x1b[31m[0]\x1b[0m Batal`);
+
+          const accNum = await promptInput(
+            "\n\x1b[36mPilih opsi [A / 1-" + list.length + "]:\x1b[0m ",
+          );
+
+          if (accNum.toLowerCase() === "a" || accNum.toLowerCase() === "all") {
+            await renewAllAccounts();
+          } else {
+            const idx = parseInt(accNum, 10) - 1;
+            const selectedEmail = list[idx];
+
+            if (accNum !== "0" && selectedEmail) {
+              console.log(
+                `\n\x1b[35m[*] Merefresh token & mereaktivasi akun "${selectedEmail}"...\x1b[0m`,
+              );
+              const res = await renewAccount(selectedEmail);
+              printAccountCard(res, {
+                title: res.isPro
+                  ? "AKUN BERHASIL DI-RENEW PRO!"
+                  : "GAGAL RENEW: AKUN EXPIRED",
+                type: res.isPro ? "success" : "error",
+                emailLabel: "Email User",
+                orderId: res.orderId,
+                note: res.message,
+                fileNote:
+                  "Tersimpan di storage/alightmotion/generated-accounts.json",
+              });
+            } else {
+              console.log("Dibatalkan.");
+            }
+          }
+        }
+      }
+
+      // 6. Lihat Daftar Akun Pro & Akun Generated (Penyimpanan Terpisah)
+      else if (choice === "6") {
+        const proAccounts = Object.entries(loadProAccounts());
+        const genAccounts = Object.entries(loadGeneratedAccounts());
+
+        console.log(
+          `\n\x1b[1m\x1b[32m=== 👑 DAFTAR AKUN MASTER & PRO ASLI (${proAccounts.length} Akun) ===\x1b[0m`,
+        );
+        console.log(
+          `\x1b[90mBerkas: storage/alightmotion/pro-accounts.json\x1b[0m\n`,
+        );
+        if (proAccounts.length === 0) {
+          console.log("  (Belum ada akun master/pro asli terdaftar)\n");
+        } else {
+          proAccounts.forEach(([em, data], i) => {
+            console.log(`  ${i + 1}. \x1b[1m\x1b[33m${em}\x1b[0m`);
+            console.log(
+              `     Status   : ${data.isPro ? "\x1b[32m[PRO AKTIF ⭐]\x1b[0m" : "\x1b[31m[EXPIRED]\x1b[0m"}`,
+            );
+            console.log(
+              `     Expired  : \x1b[90m${data.licenseExpires || data.expiresAt || "N/A"}\x1b[0m`,
+            );
+            console.log(
+              `     UID      : \x1b[90m${data.localId || "N/A"}\x1b[0m`,
+            );
+          });
+          console.log("");
+        }
+
+        console.log(
+          `\x1b[1m\x1b[36m=== ⚡ DAFTAR AKUN USER HASIL GENERATE (${genAccounts.length} Akun) ===\x1b[0m`,
+        );
+        console.log(
+          `\x1b[90mBerkas: storage/alightmotion/generated-accounts.json\x1b[0m\n`,
+        );
+        if (genAccounts.length === 0) {
+          console.log(
+            "  (Belum ada akun hasil generate. Gunakan opsi [1] untuk membuat akun Pro baru secara instan)\n",
+          );
+        } else {
+          genAccounts.forEach(([em, data], i) => {
+            console.log(`  ${i + 1}. \x1b[1m\x1b[33m${em}\x1b[0m`);
+            console.log(
+              `     Status   : ${data.isPro ? "\x1b[32m[PRO AKTIF ⭐]\x1b[0m" : "\x1b[31m[EXPIRED]\x1b[0m"}`,
+            );
+            console.log(
+              `     Mode     : \x1b[33m${(data.mode || "DIRECT").toUpperCase()}\x1b[0m`,
+            );
+            console.log(
+              `     Expired  : \x1b[90m${data.expiresAt || "N/A"}\x1b[0m`,
+            );
+            console.log(
+              `     UID      : \x1b[90m${data.localId || "N/A"}\x1b[0m`,
+            );
+          });
+          console.log("");
+
+          const loginPick = await promptInput(
+            `\x1b[36mKetik nomor akun di atas untuk buatkan Link Login HP (atau tekan Enter untuk kembali):\x1b[0m `,
+          );
+          const pIdx = parseInt(loginPick, 10) - 1;
+          if (!isNaN(pIdx) && genAccounts[pIdx]) {
+            const [selectedEmail, selectedData] = genAccounts[pIdx];
+            console.log(
+              `\n\x1b[35m[*] Mengirim Magic Link login baru ke "${selectedEmail}"...\x1b[0m`,
+            );
+            const loginRes = await getMobileLoginLink(selectedEmail, {
+              token: selectedData?.token,
+              onProgress: (m, ok) =>
+                console.log(
+                  ok
+                    ? `  \x1b[32m[✓] ${m}\x1b[0m`
+                    : `  \x1b[35m[*] ${m}\x1b[0m`,
+                ),
+            });
+            if (loginRes.success && loginRes.loginUrl) {
+              console.log(
+                `\n\x1b[1m\x1b[32m=== [✓] LINK LOGIN HP SIAP (Tinggal Tap di HP) ===\x1b[0m`,
+              );
+              console.log(`\x1b[1m\x1b[33m${loginRes.loginUrl}\x1b[0m\n`);
+              console.log(
+                `\x1b[90m👉 Salin link di atas ke HP Anda (WA/Telegram/Browser HP).`,
+              );
+              console.log(
+                `   Begitu link dibuka di HP, Alight Motion langsung terbuka & login PRO! ⭐\x1b[0m\n`,
+              );
+            } else {
+              console.log(`\x1b[33m[!] ${loginRes.message}\x1b[0m\n`);
+            }
+          }
+        }
+      }
+
+      // 7. Cek Status Lisensi Realtime
+      else if (choice === "7") {
+        console.log(
+          `\n\x1b[1m\x1b[33m--- CEK STATUS LISENSI PRO ALIGHT MOTION ---\x1b[0m`,
+        );
+        console.log(`  \x1b[32m[1]\x1b[0m 👑 Cek dari Akun Master Pro`);
+        console.log(
+          `  \x1b[32m[2]\x1b[0m 📋 Cek dari Akun Tersimpan (Pilih Email)`,
+        );
+        console.log(
+          `  \x1b[32m[3]\x1b[0m 🔑 Masukkan Firebase ID Token Manual`,
+        );
+        console.log(`  \x1b[31m[0]\x1b[0m ↩️ Batal / Kembali ke Menu`);
+
+        const subChoice = await promptInput(
+          "\n\x1b[36mPilih sumber [0-3]:\x1b[0m ",
+        );
+        let tokenToCheck = null;
+        let accountName = "";
+
+        if (subChoice === "1") {
+          const master = loadMasterSession();
+          if (!master || !master.refreshToken) {
+            console.log(
+              `\n\x1b[33m[!] Belum ada Akun Master terdaftar di storage.\x1b[0m`,
+            );
+          } else {
+            console.log(
+              `\n\x1b[35m[*] Merefresh token Akun Master (${master.email})...\x1b[0m`,
+            );
+            try {
+              const refreshed = await refreshMasterSession();
+              tokenToCheck = refreshed.idToken;
+              accountName = `Akun Master: ${master.email}`;
+            } catch (errRefresh) {
+              console.log(
+                `\n\x1b[31m[!] Gagal merefresh sesi akun master: ${errRefresh.response?.data?.error?.message || errRefresh.message}\x1b[0m`,
+              );
+              console.log(
+                `\x1b[33m    Sesi master lama kedaluwarsa. Silakan daftarkan ulang akun master via Opsi [3].\x1b[0m`,
+              );
+            }
+          }
+        } else if (subChoice === "2") {
+          const accounts = loadAccounts();
+          const list = Object.keys(accounts);
+          if (list.length === 0) {
+            console.log(
+              `\n\x1b[33m[!] Belum ada akun pro tersimpan di storage.\x1b[0m`,
+            );
+          } else {
+            console.log(`\nPilih Akun Tersimpan:`);
+            list.forEach((em, idx) =>
+              console.log(
+                `  [${idx + 1}] ${em} (${accounts[em].isPro ? "Pro" : "Expired"})`,
+              ),
+            );
+            console.log(`  [0] Batal`);
+
+            const accNum = await promptInput(
+              "\n\x1b[36mNomor akun [1-" + list.length + "]:\x1b[0m ",
+            );
+            const selectedEmail = list[parseInt(accNum, 10) - 1];
+
+            if (accNum !== "0" && selectedEmail) {
+              const acc = accounts[selectedEmail];
+              console.log(
+                `\n\x1b[35m[*] Memastikan token akun "${selectedEmail}" masih fresh...\x1b[0m`,
+              );
+              try {
+                const {
+                  idToken: ft,
+                  refreshToken: fr,
+                  wasRefreshed: wr,
+                } = await ensureFreshToken(
+                  acc.idToken,
+                  acc.refreshToken,
+                  selectedEmail,
+                );
+                tokenToCheck = ft;
+                accountName = `Akun: ${selectedEmail}`;
+                if (wr) {
+                  console.log(
+                    `  \x1b[90m[i] Token kedaluwarsa, otomatis diperbarui.\x1b[0m`,
+                  );
+                }
+              } catch (e) {
+                console.log(
+                  `\n\x1b[31m[!] Gagal memperbarui token: ${e.message}\x1b[0m`,
+                );
+              }
+            } else {
+              console.log("Dibatalkan.");
+            }
+          }
+        } else if (subChoice === "3") {
+          console.log(
+            `\n\x1b[90mCatatan: Masukkan Firebase ID Token (JWT eyJhbGci...), BUKAN Purchase Token Google Play!\x1b[0m`,
+          );
+          const manualToken = await promptInput(
+            "\x1b[33mMasukkan Firebase ID Token:\x1b[0m ",
+          );
+          if (manualToken) {
+            if (!manualToken.startsWith("ey") && !manualToken.includes(".")) {
+              console.log(
+                `\n\x1b[31m[!] Format token tidak valid!\x1b[0m`,
+              );
+              console.log(
+                `\x1b[33m    Endpoint /getAccountStatus memerlukan Firebase ID Token login akun (JWT).\x1b[0m`,
+              );
+              console.log(
+                `\x1b[32m    Tip: Pilih opsi [1] atau [2] untuk mengecek lisensi akun secara otomatis tanpa perlu copas token manual.\x1b[0m`,
+              );
+            } else {
+              tokenToCheck = manualToken;
+              accountName = "Token Manual";
+            }
+          }
+        }
+
+        if (tokenToCheck) {
+          console.log(
+            `\n\x1b[35m[*] Menghubungi Cloud Function Alight Creative...\x1b[0m`,
+          );
+          const res = await getLicenseStatus(tokenToCheck);
+          console.log(
+            `\n\x1b[1m\x1b[32m=== STATUS LISENSI LIVE DARI SERVER (${accountName}) ===\x1b[0m`,
+          );
+          console.log(
+            `  Status Pro   : ${res.isPro ? "\x1b[32m[PRO AKTIF ⭐]\x1b[0m" : "\x1b[31m[FREE / TIDAK AKTIF]\x1b[0m"}`,
+          );
+          console.log(
+            `  Masa Berlaku : \x1b[33m${res.expiresAt || "N/A"}\x1b[0m`,
+          );
+          console.log(
+            `  Benefits     : \x1b[35m${res.benefits.join(", ") || "Standard Free"}\x1b[0m`,
+          );
+          console.log(
+            `  Server Time  : \x1b[90m${res.serverTime || "N/A"}\x1b[0m`,
+          );
+        }
+      }
+
+      // 8. Download Preset XML & Audio
+      else if (choice === "8") {
+        const url = await promptInput(
+          "\n\x1b[33mMasukkan URL alight.link:\x1b[0m ",
+        );
+        if (!url) {
+          console.log("\x1b[33m[!] Dibatalkan: URL tidak boleh kosong.\x1b[0m");
+        } else {
+          console.log(
+            `\n\x1b[35m[*] Mengambil metadata & mengunduh preset fisik...\x1b[0m`,
+          );
+          const res = await downloadPreset(url, { download: true });
+          console.log(`\n\x1b[1m\x1b[32m[✓] PRESET BERHASIL DIUNDUH!\x1b[0m`);
+          console.log(`  Judul       : \x1b[1m${res.title}\x1b[0m`);
+          console.log(`  Package ID  : ${res.packageId}`);
+          if (res.saved_files?.xml)
+            console.log(
+              `  XML Project : \x1b[36m${res.saved_files.xml}\x1b[0m`,
+            );
+          if (res.saved_files?.audio)
+            console.log(
+              `  Audio Lagu  : \x1b[36m${res.saved_files.audio}\x1b[0m`,
+            );
+        }
+      } else {
+        console.log(
+          "\n\x1b[33m[!] Opsi tidak dikenali. Silakan pilih nomor [1-9].\x1b[0m",
+        );
+      }
+    } catch (err) {
+      console.error(
+        `\n\x1b[31m[Error Alight Motion]\x1b[0m ${err.response?.data?.error?.message || err.message}`,
+      );
+    }
+
+    console.log("");
+    await promptInput(
+      "\x1b[90mTekan [Enter] untuk kembali ke menu utama...\x1b[0m",
+    );
+    console.log("\n" + "=".repeat(60) + "\n");
+  }
+}
+
+/**
+ * CLI Runner Utama
+ */
+async function main() {
+  const args = process.argv.slice(2);
+  const isJson = args.includes("--json") || process.env.OUTPUT_JSON === "true";
+
+  // Mode Interaktif jika dijalankan tanpa argumen sama sekali di terminal TTY
+  const cleanFilter = args.filter(
+    (a) => !a.startsWith("--") && !a.startsWith("-"),
+  );
+  if (args.length === 0 && process.stdin.isTTY && !isJson) {
+    try {
+      await runInteractiveMenu();
+      return;
+    } catch (err) {
+      console.error(`\x1b[31m[Error]\x1b[0m ${err.message}`);
+      return;
+    }
+  }
+
+  let isMasterMode = args.includes("--master") || args.includes("-m");
+  let isGenerateMode = args.includes("--generate") || args.includes("-g");
+  let isAutoMode = args.includes("--auto") || args.includes("-a");
+  let isRenewMode = args.includes("--renew");
+  let isRenewAllMode = args.includes("--renew-all");
+  let isAccountsMode = args.includes("--accounts") || args.includes("--list");
+  let isDownloadMode = args.includes("--download") || args.includes("--save");
+
+  let sendEmailArg = "";
+  let verifyEmailArg = "";
+  let magicLinkArg = "";
+  let presetArg = "";
+  let infoTokenArg = "";
+  let licenseTokenArg = "";
+  let orderIdArg = "";
+  let orderPrefixArg = "";
+  let autoProviderArg = "mailtm";
+  let usernameTypeArg = "default";
+  let customUsernameArg = "";
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (
+      arg === "--json" ||
+      arg === "--master" ||
+      arg === "-m" ||
+      arg === "--generate" ||
+      arg === "-g" ||
+      arg === "--auto" ||
+      arg === "-a" ||
+      arg === "--renew" ||
+      arg === "--renew-all" ||
+      arg === "--accounts" ||
+      arg === "--list" ||
+      arg === "--download" ||
+      arg === "--save"
+    )
+      continue;
+
+    if (arg === "--generator" || arg === "--gen") {
+      autoProviderArg = "generator.email";
+      continue;
+    } else if (arg === "--mailtm") {
+      autoProviderArg = "mailtm";
+      continue;
+    } else if (arg.startsWith("--provider=")) {
+      autoProviderArg = arg.slice(arg.indexOf("=") + 1);
+      continue;
+    } else if (
+      arg.startsWith("--username-type=") ||
+      arg.startsWith("--type=")
+    ) {
+      usernameTypeArg = arg.slice(arg.indexOf("=") + 1);
+      continue;
+    } else if (
+      arg.startsWith("--custom-name=") ||
+      arg.startsWith("--name=") ||
+      arg.startsWith("--username=")
+    ) {
+      customUsernameArg = arg.slice(arg.indexOf("=") + 1);
+      usernameTypeArg = "custom";
+      continue;
+    } else if (arg === "--random-name" || arg === "--random") {
+      usernameTypeArg = "random";
+      continue;
+    }
+
+    if (arg.startsWith("--send=") || arg.startsWith("--send-magic=")) {
+      sendEmailArg = arg.slice(arg.indexOf("=") + 1);
+    } else if (arg === "--send" || arg === "--send-magic" || arg === "-sm") {
+      sendEmailArg = args[++i];
+    } else if (arg.startsWith("--verify=")) {
+      verifyEmailArg = arg.slice(arg.indexOf("=") + 1);
+    } else if (arg === "--verify" || arg === "-v") {
+      verifyEmailArg = args[++i];
+    } else if (arg.startsWith("--link=")) {
+      magicLinkArg = arg.slice(arg.indexOf("=") + 1);
+    } else if (arg === "--link" || arg === "-l") {
+      magicLinkArg = args[++i];
+    } else if (arg.startsWith("--preset=")) {
+      presetArg = arg.slice(arg.indexOf("=") + 1);
+    } else if (arg === "--preset" || arg === "-p") {
+      presetArg = args[++i];
+    } else if (arg.startsWith("--info=")) {
+      infoTokenArg = arg.slice(arg.indexOf("=") + 1);
+    } else if (arg === "--info") {
+      infoTokenArg = args[++i];
+    } else if (arg.startsWith("--license=") || arg.startsWith("--status=")) {
+      licenseTokenArg = arg.slice(arg.indexOf("=") + 1);
+    } else if (arg === "--license" || arg === "--status") {
+      licenseTokenArg = args[++i];
+    } else if (arg.startsWith("--order-id=")) {
+      orderIdArg = arg.slice(arg.indexOf("=") + 1);
+    } else if (arg === "--order-id") {
+      orderIdArg = args[++i];
+    } else if (arg.startsWith("--order-prefix=")) {
+      orderPrefixArg = arg.slice(arg.indexOf("=") + 1);
+    } else if (arg === "--order-prefix" || arg === "--prefix") {
+      orderPrefixArg = args[++i];
+    } else if (!arg.startsWith("--") && !arg.startsWith("-")) {
+      if (arg.includes("@")) {
+        if (!verifyEmailArg && !sendEmailArg) {
+          if (isGenerateMode || isMasterMode || isRenewMode)
+            verifyEmailArg = arg;
+          else sendEmailArg = arg;
+        } else if (sendEmailArg && !verifyEmailArg) {
+          verifyEmailArg = arg;
+        }
+      } else if (arg.includes("alight")) {
+        if (
+          arg.includes("oobCode") ||
+          arg.includes("auth_action") ||
+          arg.includes("apiKey")
+        ) {
+          magicLinkArg = arg;
+        } else {
+          presetArg = arg;
+        }
+      }
+    }
+  }
+
+  if (!isJson) {
+    printOmnifyBanner();
+  }
+
+  const startTime = Date.now();
+
+  try {
+    // 0. Mode Auto-Generate Akun Pro Instan (1-Klik Temp Mail -> Auto Inbox -> Terima Beres)
+    if (isAutoMode) {
+      if (!isJson) {
+        console.log(
+          `\x1b[35m[*] Menjalankan Auto-Generate Akun Pro 1-Klik (${autoProviderArg})...\x1b[0m\n`,
+        );
+      }
+
+      const res = await autoGenerateProAccount({
+        provider: autoProviderArg,
+        usernameType: usernameTypeArg,
+        customUsername: customUsernameArg,
+        orderId: orderIdArg || undefined,
+        orderPrefix: orderPrefixArg || undefined,
+        onProgress: !isJson
+          ? (msg, isSuccess) => {
+              console.log(
+                isSuccess
+                  ? `  \x1b[32m${msg}\x1b[0m`
+                  : `  \x1b[35m${msg}\x1b[0m`,
+              );
+            }
+          : undefined,
+      });
+
+      const duration = `${((Date.now() - startTime) / 1000).toFixed(2)} detik`;
+
+      if (isJson) {
+        console.log(
+          JSON.stringify({ status: "success", duration, ...res }, null, 2),
+        );
+      } else {
+        printAccountCard(res, {
+          title: `AKUN PRO OTOMATIS BERHASIL DIAKTIFKAN (${duration})`,
+          type: "success",
+          emailLabel: "Email Temp",
+          fileNote: "Tersimpan di storage/alightmotion/generated-accounts.json",
+        });
+
+        if (res.tempMail?.password) {
+          console.log(`  \x1b[33m[i] Akses Akun Temp Mail:\x1b[0m`);
+          console.log(`      Email    : \x1b[1m${res.tempMail.email}\x1b[0m`);
+          console.log(
+            `      Password : \x1b[36m${res.tempMail.password}\x1b[0m \x1b[90m(Bisa login di https://mail.tm)\x1b[0m\n`,
+          );
+        }
+      }
+      return;
+    }
+    // 0. Mode Lihat Daftar Akun Pro & Akun Generated (Penyimpanan Terpisah)
+    if (isAccountsMode) {
+      const proAccounts = loadProAccounts();
+      const genAccounts = loadGeneratedAccounts();
+      const duration = `${((Date.now() - startTime) / 1000).toFixed(2)} detik`;
+
+      if (isJson) {
+        console.log(
+          JSON.stringify(
+            {
+              status: "success",
+              duration,
+              totalPro: Object.keys(proAccounts).length,
+              totalGenerated: Object.keys(genAccounts).length,
+              proAccounts,
+              generatedAccounts: genAccounts,
+            },
+            null,
+            2,
+          ),
+        );
+      } else {
+        const proList = Object.entries(proAccounts);
+        const genList = Object.entries(genAccounts);
+
+        console.log(
+          `\x1b[1m\x1b[32m=== 👑 DAFTAR AKUN MASTER & PRO ASLI (${proList.length} Akun • ${duration}) ===\x1b[0m`,
+        );
+        console.log(
+          `\x1b[90mBerkas: storage/alightmotion/pro-accounts.json\x1b[0m\n`,
+        );
+        if (proList.length === 0) {
+          console.log("  (Belum ada akun master/pro asli terdaftar)\n");
+        } else {
+          proList.forEach(([em, data], i) => {
+            console.log(`  ${i + 1}. \x1b[1m\x1b[33m${em}\x1b[0m`);
+            console.log(
+              `     Status   : ${data.isPro ? "\x1b[32m[PRO AKTIF ⭐]\x1b[0m" : "\x1b[31m[EXPIRED]\x1b[0m"}`,
+            );
+            console.log(
+              `     Expired  : \x1b[90m${data.licenseExpires || data.expiresAt || "N/A"}\x1b[0m`,
+            );
+            console.log(
+              `     UID      : \x1b[90m${data.localId || "N/A"}\x1b[0m`,
+            );
+          });
+          console.log("");
+        }
+
+        console.log(
+          `\x1b[1m\x1b[36m=== ⚡ DAFTAR AKUN USER HASIL GENERATE (${genList.length} Akun) ===\x1b[0m`,
+        );
+        console.log(
+          `\x1b[90mBerkas: storage/alightmotion/generated-accounts.json\x1b[0m\n`,
+        );
+        if (genList.length === 0) {
+          console.log("  (Belum ada akun user hasil generate)\n");
+        } else {
+          genList.forEach(([em, data], i) => {
+            console.log(`  ${i + 1}. \x1b[1m\x1b[33m${em}\x1b[0m`);
+            console.log(
+              `     Status   : ${data.isPro ? "\x1b[32m[PRO AKTIF ⭐]\x1b[0m" : "\x1b[31m[EXPIRED]\x1b[0m"}`,
+            );
+            console.log(
+              `     Mode     : \x1b[33m${(data.mode || "DIRECT").toUpperCase()}\x1b[0m`,
+            );
+            console.log(
+              `     Expired  : \x1b[90m${data.expiresAt || "N/A"}\x1b[0m`,
+            );
+            console.log(
+              `     UID      : \x1b[90m${data.localId || "N/A"}\x1b[0m`,
+            );
+          });
+          console.log("");
+        }
+      }
+      return;
+    }
+
+    // 0.5. Mode Batch Auto-Renew Semua Akun Generated Sekaligus
+    if (isRenewAllMode) {
+      const renewSummary = await renewAllAccounts({
+        orderId: orderIdArg || undefined,
+        orderPrefix: orderPrefixArg || undefined,
+      });
+      if (isJson) {
+        console.log(JSON.stringify(renewSummary, null, 2));
+      }
+      return;
+    }
+
+    // 1. Mode Re-Aktivasi Akun Tersimpan (Auto-Renew Tunggal)
+    if (isRenewMode) {
+      const targetEmail = verifyEmailArg || sendEmailArg;
+      if (!targetEmail) {
+        throw new Error(
+          'Alamat email akun wajib disertakan (cth: npm run alightmotion:renew -- "user@gmail.com")',
+        );
+      }
+
+      if (!isJson)
+        console.log(
+          `\x1b[35m[Alight Motion Renew]\x1b[0m Merefresh token & mengaktivasi ulang \x1b[1m"${targetEmail}"\x1b[0m...`,
+        );
+      const result = await renewAccount(targetEmail, {
+        orderId: orderIdArg || undefined,
+        orderPrefix: orderPrefixArg || undefined,
+      });
+      const duration = `${((Date.now() - startTime) / 1000).toFixed(2)} detik`;
+
+      if (isJson) {
+        console.log(
+          JSON.stringify({ status: "success", duration, ...result }, null, 2),
+        );
+      } else {
+        printAccountCard(result, {
+          title: result.success
+            ? `AKUN BERHASIL DI-RENEW PRO (${duration})`
+            : `GAGAL RENEW: AKUN EXPIRED (${duration})`,
+          type: result.success ? "success" : "error",
+          emailLabel: "Email Akun",
+          orderId: result.orderId,
+          note: result.message,
+          fileNote:
+            "Disimpan di storage/alightmotion/generated-accounts.json / pro-accounts.json",
+        });
+      }
+      return;
+    }
+
+    // 2. Mode Set Akun Master Pro
+    if (isMasterMode && verifyEmailArg && magicLinkArg) {
+      if (!isJson)
+        console.log(
+          `\x1b[35m[Alight Motion Master]\x1b[0m Mendaftarkan akun master \x1b[1m"${verifyEmailArg}"\x1b[0m...`,
+        );
+      const result = await setMasterAccount(verifyEmailArg, magicLinkArg);
+      const duration = `${((Date.now() - startTime) / 1000).toFixed(2)} detik`;
+
+      if (isJson) {
+        console.log(
+          JSON.stringify(
+            { status: result.status, duration, ...result },
+            null,
+            2,
+          ),
+        );
+      } else {
+        if (!result.success || !result.master.isPro) {
+          printAccountCard(result.master, {
+            title: `PENDAFTARAN DITOLAK: BUKAN AKUN PRO (${duration})`,
+            type: "error",
+            emailLabel: "Email Master",
+            note:
+              result.message ||
+              "Akun berstatus Free. Hanya akun Pro aktif yang dapat didaftarkan sebagai Akun Master!",
+            fileNote: "Tidak disimpan (Akun master sebelumnya tidak diubah)",
+          });
+        } else {
+          printAccountCard(result.master, {
+            title: `AKUN MASTER BERHASIL DIDAFTARKAN & AKTIF (${duration})`,
+            type: "success",
+            emailLabel: "Email Master",
+            fileNote:
+              "Tersimpan di storage/alightmotion/master-session.json & pro-accounts.json",
+          });
+        }
+      }
+      return;
+    }
+
+    // 3. Mode Cek Sesi Master Aktif
+    if (isMasterMode && !magicLinkArg && !sendEmailArg) {
+      if (!isJson) console.log(`\x1b[35m[*] Memeriksa sesi master...\x1b[0m`);
+      const session = await refreshMasterSession();
+      const duration = `${((Date.now() - startTime) / 1000).toFixed(2)} detik`;
+
+      if (isJson) {
+        console.log(
+          JSON.stringify(
+            {
+              status: "success",
+              duration,
+              master: session,
+              developer: OMNIFY_CREDITS.developer,
+            },
+            null,
+            2,
+          ),
+        );
+      } else {
+        console.log(
+          `\x1b[32m[+] Sesi master aktif dan valid (${duration}).\x1b[0m`,
+        );
+        console.log(`  Email Master : \x1b[1m\x1b[33m${session.email}\x1b[0m`);
+        console.log(`  User UID     : \x1b[36m${session.localId}\x1b[0m`);
+        console.log(
+          `  ID Token     : \x1b[90m${session.idToken.slice(0, 40)}...\x1b[0m\n`,
+        );
+      }
+      return;
+    }
+
+    // 4. Mode Generate Akun Pro untuk User (DUAL MODE)
+    if (isGenerateMode) {
+      const userEmail = verifyEmailArg || sendEmailArg;
+      if (!userEmail) {
+        throw new Error(
+          'Alamat email user wajib disertakan (cth: npm run alightmotion:generate -- "user@gmail.com")',
+        );
+      }
+
+      if (!magicLinkArg) {
+        console.log(
+          `\x1b[35m[*] Mengirim link OOB ke USER: \x1b[1m\x1b[33m${userEmail}\x1b[0m...`,
+        );
+        const sendRes = await sendMagicLink(userEmail);
+        console.log(
+          `\x1b[32m[+] Link OOB berhasil dikirim ke email user! Cek inbox sekarang.\x1b[0m\n`,
+        );
+
+        if (process.stdin.isTTY) {
+          const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout,
+          });
+          console.log(
+            `Silakan buka email USER, salin link OOB, lalu paste di bawah:`,
+          );
+          console.log(
+            `\x1b[90m(Ketik "exit" atau "q" untuk membatalkan)\x1b[0m`,
+          );
+
+          rl.question(
+            "\x1b[36mTempel Link OOB User:\x1b[0m ",
+            async (answer) => {
+              rl.close();
+              const inputLink = answer.trim();
+              if (
+                !inputLink ||
+                inputLink.toLowerCase() === "exit" ||
+                inputLink.toLowerCase() === "q"
+              ) {
+                console.log("Dibatalkan.");
+                return;
+              }
+
+              console.log(
+                `\x1b[35m[*] Memverifikasi & mengaktifkan Pro untuk user...\x1b[0m`,
+              );
+              try {
+                const genResult = await generateProAccount(
+                  userEmail,
+                  inputLink,
+                  {
+                    orderId: orderIdArg || undefined,
+                    orderPrefix: orderPrefixArg || undefined,
+                  },
+                );
+                console.log(`\n\x1b[32m[✓] HASIL AKTIVASI USER:\x1b[0m`);
+                console.log(JSON.stringify(genResult, null, 2));
+                console.log(
+                  `\n\x1b[32m[✓] Akun user ${userEmail} berhasil aktif PRO (${genResult.mode})!\x1b[0m\n`,
+                );
+              } catch (e) {
+                console.error(
+                  `\x1b[31m[Error User]\x1b[0m ${e.response?.data?.error?.message || e.message}`,
+                );
+              }
+            },
+          );
+          return;
+        } else {
+          console.log(`Salin link dari email user, lalu verifikasi dengan:`);
+          console.log(
+            `\x1b[36mnpm run alightmotion:generate -- "${userEmail}" --link="<url_magic_link>"\x1b[0m\n`,
+          );
+          return;
+        }
+      } else {
+        console.log(`\x1b[35m[*] Memverifikasi link OOB untuk user...\x1b[0m`);
+        const genResult = await generateProAccount(userEmail, magicLinkArg, {
+          orderId: orderIdArg || undefined,
+          orderPrefix: orderPrefixArg || undefined,
+        });
+        if (isJson) {
+          console.log(JSON.stringify(genResult, null, 2));
+        } else {
+          console.log(`\n\x1b[32m[✓] HASIL AKTIVASI USER:\x1b[0m`);
+          console.log(JSON.stringify(genResult, null, 2));
+          console.log(
+            `\n\x1b[32m[✓] Akun user ${userEmail} berhasil aktif PRO (${genResult.mode})!\x1b[0m\n`,
+          );
+        }
+        return;
+      }
+    }
+
+    // 5. Mode Kirim Magic Link Biasa
+    if (sendEmailArg && !magicLinkArg) {
+      if (!isJson)
+        console.log(
+          `\x1b[35m[Alight Motion]\x1b[0m Mengirim Magic Link login resmi ke \x1b[1m"${sendEmailArg}"\x1b[0m...`,
+        );
+      const result = await sendMagicLink(sendEmailArg);
+      const duration = `${((Date.now() - startTime) / 1000).toFixed(2)} detik`;
+
+      if (isJson) {
+        console.log(
+          JSON.stringify({ status: "success", duration, ...result }, null, 2),
+        );
+      } else {
+        console.log(
+          `\n\x1b[32m[✓] Magic Link Berhasil Dikirim dalam ${duration}!\x1b[0m`,
+        );
+        console.log(`  Email User   : \x1b[1m\x1b[33m${result.email}\x1b[0m`);
+        console.log(`  Pesan        : ${result.message}`);
+        console.log(
+          `\n\x1b[90mBuka inbox email user, salin link login, lalu verifikasi dengan:\x1b[0m`,
+        );
+        console.log(
+          `\x1b[36mnpm run alightmotion:verify -- "${result.email}" --link="<url_magic_link>"\x1b[0m\n`,
+        );
+      }
+      return;
+    }
+
+    // 6. Mode Verifikasi Native Magic Link
+    if (verifyEmailArg && magicLinkArg) {
+      if (!isJson)
+        console.log(
+          `\x1b[35m[Alight Motion]\x1b[0m Memverifikasi Magic Link secara Native...`,
+        );
+      const result = await verifyMagicLink(verifyEmailArg, magicLinkArg);
+      const duration = `${((Date.now() - startTime) / 1000).toFixed(2)} detik`;
+
+      const defaultMaster =
+        process.env.ALIGHT_MASTER_EMAIL || "supermby@gmail.com";
+      if (verifyEmailArg.toLowerCase() === defaultMaster.toLowerCase()) {
+        try {
+          const lic = await getLicenseStatus(result.idToken);
+          if (lic.isPro) {
+            saveMasterSession({
+              email: result.email,
+              localId: result.localId,
+              idToken: result.idToken,
+              refreshToken: result.refreshToken,
+              isPro: true,
+              licenseExpires:
+                lic.expiresAt ||
+                new Date(Date.now() + 365 * 86400000).toISOString(),
+              benefits: lic.benefits?.length
+                ? lic.benefits
+                : ["WATERMARK_REMOVAL", "PRO_EFFECTS", "UNLIMITED_EXPORT"],
+              registeredAt: new Date().toISOString(),
+            });
+          }
+        } catch (_) {}
+      }
+
+      if (isJson) {
+        console.log(
+          JSON.stringify({ status: "success", duration, ...result }, null, 2),
+        );
+      } else {
+        console.log(
+          `\n\x1b[32m[✓] Login Native Berhasil dalam ${duration}!\x1b[0m`,
+        );
+        console.log(`  Email    : \x1b[1m\x1b[33m${result.email}\x1b[0m`);
+        console.log(`  User UID : \x1b[36m${result.localId}\x1b[0m`);
+        console.log(
+          `  ID Token : \x1b[90m${result.idToken.slice(0, 40)}...\x1b[0m`,
+        );
+        console.log(
+          `  Refresh  : \x1b[90m${result.refreshToken.slice(0, 30)}...\x1b[0m\n`,
+        );
+      }
+      return;
+    }
+
+    // 7. Mode Cek Lisensi Pro Akun (Native Cloud Function)
+    if (licenseTokenArg) {
+      if (!isJson)
+        console.log(
+          `\x1b[35m[Alight Motion License]\x1b[0m Memeriksa status lisensi Pro akun...`,
+        );
+      const result = await getLicenseStatus(licenseTokenArg);
+      const duration = `${((Date.now() - startTime) / 1000).toFixed(2)} detik`;
+
+      if (isJson) {
+        console.log(
+          JSON.stringify({ status: "success", duration, ...result }, null, 2),
+        );
+      } else {
+        console.log(
+          `\n\x1b[32m=== STATUS LISENSI ALIGHT MOTION (${duration}) ===\x1b[0m\n`,
+        );
+        console.log(
+          `  Status Pro : ${result.isPro ? "\x1b[32m[PRO AKTIF ⭐]\x1b[0m" : "\x1b[31m[FREE / TIDAK AKTIF]\x1b[0m"}`,
+        );
+        console.log(
+          `  Expired At : \x1b[33m${result.expiresAt || "N/A"}\x1b[0m`,
+        );
+        console.log(
+          `  Benefits   : \x1b[35m${result.benefits.join(", ") || "Standard Free"}\x1b[0m\n`,
+        );
+      }
+      return;
+    }
+
+    // 8. Mode Download Preset XML & Audio
+    if (presetArg) {
+      if (!isJson)
+        console.log(
+          `\x1b[35m[Alight Motion Preset]\x1b[0m Mengambil data preset: \x1b[36m${presetArg}\x1b[0m...`,
+        );
+      const result = await downloadPreset(presetArg, {
+        download: isDownloadMode,
+      });
+      const duration = `${((Date.now() - startTime) / 1000).toFixed(2)} detik`;
+
+      if (isJson) {
+        console.log(
+          JSON.stringify({ status: "success", duration, ...result }, null, 2),
+        );
+      } else {
+        console.log(
+          `\n\x1b[32m=== PRESET ALIGHT MOTION (${duration}) ===\x1b[0m\n`,
+        );
+        console.log(`  Judul     : \x1b[1m${result.title}\x1b[0m`);
+        console.log(`  Deskripsi : ${result.description || "N/A"}`);
+        console.log(
+          `  Thumbnail : \x1b[34m${result.thumbnail || "N/A"}\x1b[0m`,
+        );
+        console.log(
+          `  XML Link  : \x1b[32m\x1b[4m${result.xmlDownloadUrl}\x1b[0m`,
+        );
+        if (result.audioDownloadUrl) {
+          console.log(
+            `  Audio Link: \x1b[33m\x1b[4m${result.audioDownloadUrl}\x1b[0m`,
+          );
+        }
+        if (result.saved_files) {
+          console.log(
+            `\n\x1b[1m\x1b[32m[✓] Berkas Fisik Berhasil Disimpan:\x1b[0m`,
+          );
+          if (result.saved_files.xml)
+            console.log(
+              `  • XML Project : \x1b[36m${result.saved_files.xml}\x1b[0m`,
+            );
+          if (result.saved_files.audio)
+            console.log(
+              `  • Audio File  : \x1b[36m${result.saved_files.audio}\x1b[0m`,
+            );
+        }
+        console.log("");
+      }
+      return;
+    }
+
+    // 9. Mode User Info Lookup
+    if (infoTokenArg) {
+      if (!isJson)
+        console.log(
+          `\x1b[35m[Alight Motion Info]\x1b[0m Mengambil profil user...`,
+        );
+      const result = await getAccountInfo(infoTokenArg);
+      const duration = `${((Date.now() - startTime) / 1000).toFixed(2)} detik`;
+
+      if (isJson) {
+        console.log(
+          JSON.stringify({ status: "success", duration, ...result }, null, 2),
+        );
+      } else {
+        console.log(
+          `\n\x1b[32m=== PROFIL USER ALIGHT MOTION (${duration}) ===\x1b[0m\n`,
+        );
+        console.log(`  Email     : \x1b[1m${result.email}\x1b[0m`);
+        console.log(`  UID       : \x1b[36m${result.localId}\x1b[0m`);
+        console.log(`  Created   : ${result.createdAt}`);
+        console.log(`  Last Login: ${result.lastLoginAt}\n`);
+      }
+      return;
+    }
+
+    // Help Default
+    console.log(`
+\x1b[33m=== ALIGHT MOTION SUITE CLI (100% NATIVE v2.0) ===\x1b[0m
+Penggunaan:
+  1. Auto-Generate Akun Pro Instan (1-Klik)   : \x1b[36mnpm run alightmotion:auto\x1b[0m
+  2. Generate Akun Pro User Manual            : \x1b[36mnpm run alightmotion:generate -- "<user_email>"\x1b[0m
+  3. Re-Aktivasi Akun Pro (Auto-Renew Tunggal): \x1b[36mnpm run alightmotion:renew -- "<user_email>"\x1b[0m
+  4. Re-Aktivasi SEMUA Akun (Batch Auto-Renew): \x1b[36mnpm run alightmotion:renew:all\x1b[0m
+  5. Lihat Daftar Akun Pro & Generated        : \x1b[36mnpm run alightmotion:accounts\x1b[0m
+  6. Kirim Magic Link Email                   : \x1b[36mnpm run alightmotion:send -- "<email>"\x1b[0m
+  7. Verifikasi Native Link                   : \x1b[36mnpm run alightmotion:verify -- "<email>" --link="<magic_link>"\x1b[0m
+  8. Download Preset XML & Audio MP3          : \x1b[36mnpm run alightmotion:preset -- "https://alight.link/xxxx" --download\x1b[0m
+  9. Daftarkan Akun Master Pro (Opsional)     : \x1b[36mnpm run alightmotion:master -- "<master_email>" --link="<magic_link>"\x1b[0m
+  10. Cek Status Sesi Master                  : \x1b[36mnpm run alightmotion:master:status\x1b[0m
+`);
+  } catch (err) {
+    if (isJson) {
+      console.log(
+        JSON.stringify({
+          error: err.response?.data?.error?.message || err.message,
+          developer: OMNIFY_CREDITS.developer,
+        }),
+      );
+    } else {
+      console.error(
+        `\n\x1b[31m[Error Alight Motion]\x1b[0m ${err.response?.data?.error?.message || err.message}\n`,
+      );
+    }
+    process.exit(1);
+  }
+}
+
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  DEV_METADATA: OMNIFY_CREDITS,
+  sendMagicLink,
+  verifyMagicLink,
+  getAccountInfo,
+  getLicenseStatus,
+  setMasterAccount,
+  refreshMasterSession,
+  heartbeatMasterSession,
+  generateDeviceProfile,
+  refreshUserToken,
+  getMasterAccountStatus,
+  ensureMasterAccountReady,
+  generateProAccount,
+  autoGenerateProAccount,
+  batchGenerateProAccounts,
+  getMobileLoginLink,
+  renewAccount,
+  renewAllAccounts,
+  applyPremium,
+  downloadPreset,
+  extractOobCode,
+  loadAccounts,
+  loadProAccounts,
+  saveProAccount,
+  loadGeneratedAccounts,
+  saveGeneratedAccount,
+  saveAccount,
+  getSavedAccount,
+  deleteSavedAccount,
+  isTokenExpired,
+  ensureFreshToken,
+  printAccountCard,
+  alightmotion: {
+    developer: OMNIFY_CREDITS.developer,
+    channel: OMNIFY_CREDITS.channel,
+    signature: OMNIFY_CREDITS.signature,
+    sendMagicLink,
+    verifyMagicLink,
+    getAccountInfo,
+    getLicenseStatus,
+    setMasterAccount,
+    refreshMasterSession,
+    heartbeatMasterSession,
+    generateDeviceProfile,
+    refreshUserToken,
+    getMasterAccountStatus,
+    ensureMasterAccountReady,
+    isTokenExpired,
+    ensureFreshToken,
+    generateProAccount,
+    autoGenerateProAccount,
+    batchGenerateProAccounts,
+    getMobileLoginLink,
+    renewAccount,
+    renewAllAccounts,
+    applyPremium,
+    downloadPreset,
+    loadAccounts,
+    loadProAccounts,
+    saveProAccount,
+    loadGeneratedAccounts,
+    saveGeneratedAccount,
+    saveAccount,
+    getSavedAccount,
+    isTokenExpired,
+    printAccountCard,
+  },
+};
